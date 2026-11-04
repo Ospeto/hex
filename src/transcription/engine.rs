@@ -82,6 +82,11 @@ impl Deadlines {
 }
 
 pub(crate) enum Command {
+    CloudDictation {
+        clip: Vec<f32>,
+        canceled: Box<dyn Fn() -> bool + Send>,
+        job: Job,
+    },
     Begin {
         stream: u64,
         /// Aborts this stream only.
@@ -337,6 +342,7 @@ pub struct Transcribed {
 pub enum Source {
     Stream,
     Offline,
+    OpenRouter,
     /// The stream could not be used; the reason is logged with the result.
     Fallback(String),
 }
@@ -346,6 +352,7 @@ impl Source {
         match self {
             Self::Stream => "stream",
             Self::Offline => "offline",
+            Self::OpenRouter => "openrouter",
             Self::Fallback(_) => "fallback",
         }
     }
@@ -526,6 +533,12 @@ impl PendingTranscript {
     }
 }
 
+impl Drop for PendingTranscript {
+    fn drop(&mut self) {
+        self.abandon();
+    }
+}
+
 impl TranscriptionEngine {
     pub fn start(model: Model) -> Result<Self> {
         let streams = Arc::new(AtomicBool::new(model.stream_options().is_some()));
@@ -608,7 +621,7 @@ impl TranscriptionEngine {
 
     /// Opens a live stream when the loaded model can stream on this device.
     pub fn begin(&self) -> Option<LiveStream> {
-        if !self.streams.load(Ordering::Acquire) {
+        if crate::labs::openrouter_dictation() || !self.streams.load(Ordering::Acquire) {
             return None;
         }
         let id = self.next_stream.fetch_add(1, Ordering::Relaxed) + 1;
@@ -667,6 +680,10 @@ impl TranscriptionEngine {
     /// or when the stream is unusable, the clip is transcribed offline.
     #[cfg(not(target_os = "macos"))]
     pub fn finish(&self, stream: Option<LiveStream>, clip: Vec<f32>) -> Result<PendingTranscript> {
+        if crate::labs::openrouter_dictation() {
+            drop(stream);
+            return self.finish_openrouter(clip, || false);
+        }
         self.finish_with(
             stream,
             clip,
@@ -679,6 +696,19 @@ impl TranscriptionEngine {
                     .map_err(|error| format!("{error:#}"))
             }),
         )
+    }
+
+    /// Completed dictation only: no model activation or speculative local result.
+    pub(crate) fn finish_openrouter(
+        &self,
+        clip: Vec<f32>,
+        canceled: impl Fn() -> bool + Send + 'static,
+    ) -> Result<PendingTranscript> {
+        self.request(clip.len(), None, |job| Command::CloudDictation {
+            clip,
+            canceled: Box::new(canceled),
+            job,
+        })
     }
 
     /// Like `finish`, with the caller's offline transcription of the clip.
@@ -961,6 +991,35 @@ impl Worker {
                 return;
             };
             match command {
+                Command::CloudDictation {
+                    clip,
+                    canceled,
+                    job,
+                } => {
+                    let started = Instant::now();
+                    self.start(&job);
+                    self.running.enter(&job.cancel);
+                    self.dictating.store(true, Ordering::Release);
+                    let canceled = || {
+                        job.cancel.is_cancelled()
+                            || canceled()
+                            || !crate::labs::openrouter_dictation()
+                    };
+                    let result = crate::transcription::openrouter::transcribe(&clip, &canceled)
+                        .and_then(|text| {
+                            if canceled() {
+                                Err("OpenRouter dictation was canceled".into())
+                            } else {
+                                Ok(Transcribed {
+                                    text,
+                                    source: Source::OpenRouter,
+                                    finish_ms: started.elapsed().as_millis() as u64,
+                                })
+                            }
+                        });
+                    job.finish(result);
+                    self.dictating.store(false, Ordering::Release);
+                }
                 Command::Begin {
                     stream,
                     cancel,

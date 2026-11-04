@@ -83,7 +83,8 @@ impl Category {
             | Feature::MeetingSummaryModel
             | Feature::MeetingNotesVocabulary
             | Feature::MeetingFinishedEvent => Self::Meetings,
-            Feature::LiveText
+            Feature::OpenRouterDictation
+            | Feature::LiveText
             | Feature::NotchIndicator
             | Feature::SmartSpacing
             | Feature::SpokenFormatting
@@ -153,7 +154,8 @@ impl Place {
             Feature::LiveText | Feature::NotchIndicator => {
                 Self::Elsewhere(tr("Dictation indicator"))
             }
-            Feature::SmartSpacing
+            Feature::OpenRouterDictation
+            | Feature::SmartSpacing
             | Feature::SpokenFormatting
             | Feature::SpokenSymbols
             | Feature::FillerWords

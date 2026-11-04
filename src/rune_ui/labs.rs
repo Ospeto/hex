@@ -537,6 +537,12 @@ fn rows(ui: &Ui) -> Vec<Row> {
         ));
     }
     rows.push(row(
+        Feature::OpenRouterDictation,
+        Some(&WAVE),
+        tr("OpenRouter dictation"),
+        tr("Send audio to OpenRouter/Google Gemini 3.5 Flash Lite after recording. Requires HEX_OPENROUTER_API_KEY, network access and usage charges. Local model stays selected for other features."),
+    ));
+    rows.push(row(
         Feature::UnloadIdle,
         Some(&TIMER),
         tr("Unload model when idle"),
@@ -718,6 +724,7 @@ fn row_key(lab: Lab) -> &'static str {
         Feature::MeetingNotesVocabulary => "lab-meeting-notes-vocabulary",
         Feature::NotchIndicator => "lab-notch-indicator",
         Feature::MeetingFinishedEvent => "lab-meeting-finished-event",
+        Feature::OpenRouterDictation => "lab-openrouter-dictation",
     }
 }
 

@@ -22,6 +22,7 @@ pub(crate) mod local_transcriber;
 pub(crate) mod model_benchmarks;
 pub(crate) mod model_details;
 pub(crate) mod models;
+pub(crate) mod openrouter;
 pub(crate) mod pause_segmenter;
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) mod preparation;

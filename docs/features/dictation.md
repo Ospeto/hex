@@ -1,7 +1,12 @@
 # Dictation
 
-Hold the configured shortcut, speak, and release. Hex transcribes locally and
-inserts the result at the current focus. New captures do not cancel accepted
+Hold the configured shortcut, speak, and release. Hex transcribes locally by
+default and inserts the result at the current focus. In this fork, Labs ›
+OpenRouter dictation instead sends completed dictation audio to OpenRouter and
+Google Gemini 3.5 Flash Lite, with network access, usage charges and additional
+record-then-transcribe latency. It is off by default; see the
+[provider configuration and privacy notice](../../README.md#openrouter-dictation-optional)
+and [checks and proof limits](labs.md#openrouter-dictation-in-this-fork). New captures do not cancel accepted
 work. Only Toggle mode has a cancel: its cancel shortcut, Escape by default,
 discards the recording (#786, #1022); every other intentional dictation
 finishes and pastes.

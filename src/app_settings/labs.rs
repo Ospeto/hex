@@ -6,6 +6,8 @@ use super::*;
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(default)]
 pub struct LabsSettings {
+    /// Completed dictation audio goes to OpenRouter/Google instead of the local model.
+    pub openrouter_dictation: bool,
     /// Live text beside the HUD while dictating.
     pub live_text: bool,
     pub live_chapters: bool,
@@ -83,6 +85,7 @@ pub const UNLOAD_IDLE_MINUTES: [u32; 4] = [5, 15, 30, 60];
 impl Default for LabsSettings {
     fn default() -> Self {
         Self {
+            openrouter_dictation: false,
             live_text: false,
             live_chapters: false,
             playground: false,

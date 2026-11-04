@@ -1,5 +1,40 @@
 # Labs
 
+## OpenRouter dictation in this fork
+
+`labs.openrouter_dictation` is off by default (audience Everyone).
+`hex labs on openrouter-dictation` or the Labs switch opts completed dictations
+into OpenRouter/Google transmission; off restores the saved local model. See
+[configuration and privacy](../../README.md#openrouter-dictation-optional).
+
+```ts
+Completed dictation                         // labs.openrouter-dictation
+├── Off -> existing local transcription and insertion
+└── On -> discard speculative local stream -> bounded engine queue
+    ├── Missing HEX_OPENROUTER_API_KEY -> clear failure, no upload
+    ├── WAV in memory -> base64 input_audio -> chat/completions
+    │   └── fixed google/gemini-3.5-flash-lite, no retry or fallback
+    ├── Complete plain text -> existing processing and ordered output
+    └── Canceled, timed out, refused, malformed or failed -> no insertion
+```
+
+Network work runs on the engine thread, never the UI or capture thread; no
+second microphone opens. Existing setup/local-model preparation remains
+required. Meetings, Annotate, host audio and History retranscription are not
+routed to this provider. Ten-minute request-audio cap, 1 MiB response cap and
+60-second request deadline are client safety limits, not advertised model
+limits. Source: `transcription/openrouter.rs`, `transcription/engine.rs`,
+`parakeet.rs`, `linux/dictation.rs`, `windows/dictation.rs`.
+
+Observed offline: the production client compiles in a standalone harness;
+four tests pass for WAV payload, exact model, complete text, invalid responses,
+HTTP auth/credit/rate failures and cancellation using a loopback fixture and an
+invented key. These are client-contract checks, not GUI or insertion proof.
+Full Mac build is currently blocked by Command Line Tools lacking the
+FoundationModelsMacros plugin; live API, GUI insertion and installation have
+not been exercised. No private key or real audio was used.
+
+
 Labs holds features we're unsure about, **especially features people asked
 for that we built**: they land in Labs, off by default, instead of shipping
 on. Each feature also has an **audience** (`labs::Feature::audience`, one
@@ -21,6 +56,7 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 ├── Meetings (beta) yes   meetings.enabled             (macOS)   Meetings joins the sidebar: call detection, recording, transcripts
 ├── Voice Filter    yes   experimental.hex_microphone  (macOS, Linux) Voice Filter joins the sidebar; feeds the Hex Microphone (macOS driver, Linux PipeWire source)
 ├── Playground      yes   labs.playground                        a Playground sidebar item and ⇧⌘D open the story browser
+├── OpenRouter dictation no labs.openrouter_dictation (all OSes) completed dictation audio goes to OpenRouter/Google Gemini 3.5 Flash Lite; requires an app-scoped environment key, network and usage charges
 ├── Live text       no    labs.live_text                         provisional words beside the HUD while dictating
 ├── Live chapters   no    labs.live_chapters           (macOS)   chapters a meeting while it records, boundary pass after Stop
 ├── Vocabulary biasing no labs.vocabulary_biasing                Parakeet transcription biased toward the vocabulary (#452/#457)

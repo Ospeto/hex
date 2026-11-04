@@ -103,10 +103,11 @@ pub enum Feature {
     MeetingNotesVocabulary,
     NotchIndicator,
     MeetingFinishedEvent,
+    OpenRouterDictation,
 }
 
 impl Feature {
-    pub const ALL: [Self; 44] = [
+    pub const ALL: [Self; 45] = [
         Self::Meetings,
         Self::VoiceFilter,
         Self::Playground,
@@ -151,6 +152,7 @@ impl Feature {
         Self::MeetingNotesVocabulary,
         Self::NotchIndicator,
         Self::MeetingFinishedEvent,
+        Self::OpenRouterDictation,
     ];
 
     /// The features this OS and build have.
@@ -217,7 +219,8 @@ impl Feature {
             | Self::GnomeClipboardRestore
             | Self::MeetingNotesVocabulary
             | Self::MeetingFinishedEvent
-            | Self::NotchIndicator => Audience::Everyone,
+            | Self::NotchIndicator
+            | Self::OpenRouterDictation => Audience::Everyone,
         }
     }
 
@@ -267,7 +270,7 @@ impl Feature {
             | Self::GnomeClipboardRestore
             | Self::MeetingNotesVocabulary
             | Self::NotchIndicator => 20261103,
-            Self::MeetingFinishedEvent => 20261104,
+            Self::MeetingFinishedEvent | Self::OpenRouterDictation => 20261104,
         }
     }
 
@@ -338,6 +341,7 @@ impl Feature {
             | Self::MeetingSummaryModel
             | Self::MeetingNotesVocabulary
             | Self::MeetingFinishedEvent
+            | Self::OpenRouterDictation
             | Self::FillerWords => true,
         }
     }
@@ -389,6 +393,7 @@ impl Feature {
             Self::MeetingNotesVocabulary => "meeting-notes-vocabulary",
             Self::NotchIndicator => "notch-indicator",
             Self::MeetingFinishedEvent => "meeting-finished-event",
+            Self::OpenRouterDictation => "openrouter-dictation",
         }
     }
 
@@ -439,6 +444,7 @@ impl Feature {
             Self::MeetingNotesVocabulary => "labs.meeting_notes_vocabulary",
             Self::NotchIndicator => "labs.notch_indicator",
             Self::MeetingFinishedEvent => "labs.meeting_finished_event",
+            Self::OpenRouterDictation => "labs.openrouter_dictation",
         }
     }
 
@@ -446,6 +452,9 @@ impl Feature {
     /// its translated row.
     pub const fn description(self) -> &'static str {
         match self {
+            Self::OpenRouterDictation => {
+                "Send completed dictation audio to OpenRouter/Google Gemini 3.5 Flash Lite; requires HEX_OPENROUTER_API_KEY, network access and usage charges; transcribes after recording"
+            }
             Self::Meetings => "Record calls and keep transcripts (its own pane)",
             Self::VoiceFilter => {
                 "Hex Microphone virtual input and real-time voice filters (its own pane)"
@@ -613,6 +622,7 @@ impl Feature {
             Self::MeetingNotesVocabulary => settings.labs.meeting_notes_vocabulary,
             Self::NotchIndicator => settings.labs.notch_indicator,
             Self::MeetingFinishedEvent => settings.labs.meeting_finished_event,
+            Self::OpenRouterDictation => settings.labs.openrouter_dictation,
         }
     }
 
@@ -665,6 +675,7 @@ impl Feature {
             &mut labs.meeting_notes_vocabulary,
             &mut labs.notch_indicator,
             &mut labs.meeting_finished_event,
+            &mut labs.openrouter_dictation,
         ]
     }
 
@@ -717,6 +728,7 @@ impl Feature {
             Self::MeetingNotesVocabulary => settings.labs.meeting_notes_vocabulary = on,
             Self::NotchIndicator => settings.labs.notch_indicator = on,
             Self::MeetingFinishedEvent => settings.labs.meeting_finished_event = on,
+            Self::OpenRouterDictation => settings.labs.openrouter_dictation = on,
             // Off, no shortcut keeps a key only the feature allows.
             Self::StandaloneSpecialKeys => {
                 settings.labs.standalone_special_keys = on;
@@ -760,6 +772,11 @@ const GNOME_CLIPBOARD_RESTORE: u64 = 1 << 25;
 const MEETING_NOTES_VOCABULARY: u64 = 1 << 26;
 const NOTCH_INDICATOR: u64 = 1 << 27;
 const MEETING_FINISHED_EVENT: u64 = 1 << 28;
+const OPENROUTER_DICTATION: u64 = 1 << 29;
+
+pub fn openrouter_dictation() -> bool {
+    on(OPENROUTER_DICTATION)
+}
 /// Unload-idle minutes (at most 1,440, 11 bits) sit above the switches.
 const MINUTES_SHIFT: u64 = 32;
 
@@ -984,6 +1001,11 @@ fn encode(settings: &LabsSettings) -> u64 {
 fn encode_where(settings: &LabsSettings, reaches: impl Fn(Feature) -> bool) -> u64 {
     let minutes = u64::from(settings.unload_idle_minutes.clamp(1, 24 * 60)) << MINUTES_SHIFT;
     [
+        (
+            Feature::OpenRouterDictation,
+            settings.openrouter_dictation,
+            OPENROUTER_DICTATION,
+        ),
         (Feature::LiveText, settings.live_text, LIVE_TEXT),
         (Feature::LiveChapters, settings.live_chapters, LIVE_CHAPTERS),
         (Feature::Playground, settings.playground, PLAYGROUND),

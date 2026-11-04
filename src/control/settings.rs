@@ -264,6 +264,11 @@ const KEYS: &[Key] = &[
         "How long dictation history is kept",
     ),
     key(
+        "labs.openrouter_dictation",
+        Kind::Bool,
+        "Labs: send completed dictation audio to OpenRouter/Google Gemini 3.5 Flash Lite; needs HEX_OPENROUTER_API_KEY, network access and usage charges; transcribes after recording",
+    ),
+    key(
         "labs.live_text",
         Kind::Bool,
         "Labs: provisional words beside the HUD while dictating",

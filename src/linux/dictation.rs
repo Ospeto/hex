@@ -190,6 +190,7 @@ impl DictationOutput {
         inference_ms: u64,
         started: Instant,
         recording: Option<crate::history::Recording>,
+        openrouter: bool,
     ) -> Result<String> {
         let context = crate::linux::context::capture();
         let processed = if raw {
@@ -219,6 +220,9 @@ impl DictationOutput {
                 started.elapsed().as_millis() as u64,
                 recording,
             );
+            if openrouter {
+                draft.model = Some(crate::transcription::openrouter::MODEL.into());
+            }
             if printed {
                 draft.kind = crate::history::HistoryKind::Printed;
             } else if raw {
@@ -330,6 +334,8 @@ pub(crate) fn run(
                     audio_ms = job.audio_ms,
                     "transcribed Linux dictation"
                 );
+                let openrouter =
+                    transcribed.source == crate::transcription::engine::Source::OpenRouter;
                 let text = transcribed.text;
                 if text.is_empty() {
                     if let Some(print) = job.print.take() {
@@ -346,6 +352,7 @@ pub(crate) fn run(
                         inference_ms,
                         started,
                         job.recording.take(),
+                        openrouter,
                     );
                 }
                 let paster = paster.as_mut().map_err(|error| eyre!("{error:#}"))?;
@@ -357,6 +364,7 @@ pub(crate) fn run(
                     inference_ms,
                     started,
                     job.recording.take(),
+                    openrouter,
                 )
             })()
             .map_err(|error| format!("{error:#}"));

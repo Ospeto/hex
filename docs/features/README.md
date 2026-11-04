@@ -25,7 +25,10 @@ Hex                                      // macOS release
 ```
 
 [Dictation](dictation.md), [Meetings](meetings.md), and [Recovery](recovery.md)
-have detailed maps.
+have detailed maps. This fork adds optional, off-by-default
+[OpenRouter dictation](labs.md#openrouter-dictation-in-this-fork): completed
+clips leave the device for OpenRouter/Google, with usage charges and network
+latency; other transcription paths stay local.
 [Accessibility](accessibility.md) maps what screen readers, Voice Control, and
 automation (strobe's benches) read from the window, the HUD, and the capsules.
 Agents can [read retained transcripts](transcript-cli.md) and

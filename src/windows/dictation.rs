@@ -877,7 +877,9 @@ fn process_dictation_job(
     // The context read starts now so the UIA walk overlaps inference.
     let pending_context = crate::windows::context::begin_capture();
     let inference_started = Instant::now();
+    let mut openrouter = false;
     let transcription = job.transcript.wait().map(|transcribed| {
+        openrouter = transcribed.source == crate::transcription::engine::Source::OpenRouter;
         tracing::info!(
             source = transcribed.source.label(),
             finish_ms = transcribed.finish_ms,
@@ -927,6 +929,9 @@ fn process_dictation_job(
                 started.elapsed().as_millis() as u64,
                 job.recording.take(),
             );
+            if openrouter {
+                draft.model = Some(crate::transcription::openrouter::MODEL.into());
+            }
             if printed {
                 draft.kind = crate::history::HistoryKind::Printed;
             } else if job.raw {

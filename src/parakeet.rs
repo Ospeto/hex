@@ -123,6 +123,7 @@ struct ProcessorJob {
 /// Pipeline timings carried from inference through output for the final log.
 #[derive(Clone, Copy)]
 struct JobTimings {
+    openrouter: bool,
     total_started: Instant,
     queue_ms: u128,
     audio_ms: u64,
@@ -383,7 +384,15 @@ impl DictationWorker {
         let (_, selection) = crate::app_settings::transcription_selection();
         let submitted_at = Instant::now();
         let audio_ms = clip.duration_ms();
+        let cloud =
+            crate::labs::openrouter_dictation() && !matches!(target, TranscriptionTarget::Service);
         let stream = clip.take_stream();
+        let stream = if cloud {
+            drop(stream);
+            None
+        } else {
+            stream
+        };
         let _capture = clip.take_capture_marker();
         let samples = clip.into_transcription_samples();
         crate::dictation::diagnostics::persist(&samples);
@@ -407,9 +416,13 @@ impl DictationWorker {
                     .map_err(|error| error.to_string())
             })
         };
-        let transcript = engine
-            .finish_with(stream, samples, offline)
-            .map_err(|_| "dictation worker is unavailable")?;
+        let transcript = if cloud {
+            let control = control.clone();
+            engine.finish_openrouter(samples, move || control.is_cancelled())
+        } else {
+            engine.finish_with(stream, samples, offline)
+        }
+        .map_err(|_| "dictation worker is unavailable")?;
         jobs.try_send(InferenceJob {
             job_id,
             control: control.clone(),
@@ -755,7 +768,9 @@ fn run_inference_worker(
         let queue_ms = total_started.elapsed().as_millis();
         let inference_started = Instant::now();
         let audio_ms = job.audio_ms;
+        let mut openrouter = false;
         let result = job.transcript.wait().map(|transcribed| {
+            openrouter = transcribed.source == crate::transcription::engine::Source::OpenRouter;
             tracing::info!(
                 source = transcribed.source.label(),
                 finish_ms = transcribed.finish_ms,
@@ -776,6 +791,7 @@ fn run_inference_worker(
             corrected
         });
         let timings = JobTimings {
+            openrouter,
             total_started,
             queue_ms,
             audio_ms,
@@ -1077,7 +1093,11 @@ fn record_history(
         inference_ms: completed.timings.inference_ms as u64,
         total_ms: completed.timings.total_started.elapsed().as_millis() as u64,
         recording: completed.recording.take(),
-        model: crate::history::dictation_model(),
+        model: if completed.timings.openrouter {
+            Some(crate::transcription::openrouter::MODEL.into())
+        } else {
+            crate::history::dictation_model()
+        },
     };
     if let Err(error) = history.record(draft) {
         tracing::warn!(%error, "could not record dictation history");
@@ -1311,6 +1331,7 @@ mod tests {
             text: "raw instruction".into(),
             context: ContextSnapshot::default(),
             timings: JobTimings {
+                openrouter: false,
                 total_started: Instant::now(),
                 queue_ms: 0,
                 audio_ms: 1000,
@@ -1483,6 +1504,37 @@ mod tests {
             output_receiver.try_recv().unwrap().sequence(),
             MAX_PENDING_OUTPUTS as u64
         );
+    }
+
+    /// The cloud response uses the same final output fence as local dictation.
+    #[test]
+    fn openrouter_text_inserts_but_failures_and_canceled_responses_do_not() {
+        for (response, canceled, expected) in [
+            (br#"{"choices":[{"finish_reason":"stop","message":{"content":"Fixture transcript."}}]}"#.as_slice(), false, Some("Fixture transcript.")),
+            (br#"{"error":{"message":"provider failure"}}"#.as_slice(), false, None),
+            (br#"{"choices":[{"finish_reason":"stop","message":{"content":"late text"}}]}"#.as_slice(), true, None),
+        ] {
+            let control = Arc::new(JobControl::default());
+            control.cancelled.store(canceled, Ordering::Release);
+            let result = crate::transcription::openrouter::transcript(response).map(|text| CompletedTranscript {
+                raw: text.clone(), text, application: None,
+                timings: JobTimings { openrouter: true, total_started: Instant::now(), queue_ms: 0, audio_ms: 1000, prepare_ms: 0, inference_ms: 0 },
+                processing: None, recording: None,
+            });
+            let mut inserted = Vec::new();
+            let mut last = None;
+            finish_output(
+                OutputJob::Completed { job_id: DictationJobId(0), control, target: TranscriptionTarget::Paste, result: Box::new(result) },
+                &mut |text: &str, _, commit: &dyn Fn() -> bool| {
+                    assert!(commit());
+                    inserted.push(text.to_owned());
+                    Ok(())
+                },
+                &mut last, None,
+            );
+            assert_eq!(inserted, expected.into_iter().map(str::to_owned).collect::<Vec<_>>());
+            assert_eq!(last.as_deref(), expected);
+        }
     }
 
     #[test]
