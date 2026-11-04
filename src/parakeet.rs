@@ -18,7 +18,7 @@ use crate::meeting;
 use crate::paste::{PasteMode, Paster};
 use crate::suppression::InputActivity;
 use crate::transcription::WarmTranscriber;
-use crate::transcription::engine::{PendingTranscript, TranscriptionEngine};
+use crate::transcription::engine::{QueuedTranscript, TranscriptionEngine};
 use crate::transcription::gguf_session::OfflineGgufSession;
 use crate::transcription::models::{
     TranscriptionModelId, TranscriptionSelection, model_path, validate,
@@ -101,7 +101,7 @@ struct InferenceJob {
     job_id: DictationJobId,
     control: Arc<JobControl>,
     submitted_at: Instant,
-    transcript: PendingTranscript,
+    transcript: QueuedTranscript,
     audio_ms: u64,
     prepare_ms: u128,
     target: TranscriptionTarget,
@@ -418,9 +418,11 @@ impl DictationWorker {
         };
         let transcript = if cloud {
             let control = control.clone();
-            engine.finish_openrouter(samples, move || control.is_cancelled())
+            Ok(engine.queue_openrouter(samples, move || control.is_cancelled()))
         } else {
-            engine.finish_with(stream, samples, offline)
+            engine
+                .finish_with(stream, samples, offline)
+                .map(QueuedTranscript::from)
         }
         .map_err(|_| "dictation worker is unavailable")?;
         jobs.try_send(InferenceJob {

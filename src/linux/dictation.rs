@@ -22,13 +22,13 @@ use crate::linux::input::{
 };
 use crate::linux::paste::LinuxPaster;
 use crate::linux::rune_hud::LinuxIndicator;
-use crate::transcription::engine::{PendingTranscript, TranscriptionEngine};
+use crate::transcription::engine::{QueuedTranscript, TranscriptionEngine};
 use crate::transcription::local_transcriber::LocalTranscriber;
 
 const UPDATE_INTERVAL: Duration = Duration::from_millis(20);
 
 struct Job {
-    transcript: PendingTranscript,
+    transcript: QueuedTranscript,
     audio_ms: u64,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
@@ -1056,7 +1056,7 @@ fn submit_capture(
     capture: &mut DictationCapture,
     ended_at: CaptureInstant,
     tail: Duration,
-    engine: &TranscriptionEngine,
+    engine: &Arc<TranscriptionEngine>,
     jobs: &SyncSender<OutputJob>,
     events: &mut EventLog,
     pending: &mut usize,
@@ -1085,7 +1085,7 @@ fn submit_capture(
             let samples = clip.into_transcription_samples();
             let recording = crate::history::Recording::keep(&samples);
             let job = OutputJob::Dictation(Job {
-                transcript: engine.finish(stream, samples)?,
+                transcript: engine.queue_dictation(stream, samples)?,
                 audio_ms,
                 recording,
                 print,
@@ -1273,6 +1273,7 @@ mod tests {
     #[test]
     fn a_release_finishes_its_stream_with_the_complete_clip() {
         let (engine, commands) = TranscriptionEngine::for_test();
+        let engine = Arc::new(engine);
         let (mut events, path) = event_log();
         let (jobs, queued) = mpsc::sync_channel(2);
         let mut capture = DictationCapture::new(16_000);
@@ -1335,6 +1336,7 @@ mod tests {
     #[test]
     fn escape_and_short_taps_cancel_the_stream_and_submit_nothing() {
         let (engine, commands) = TranscriptionEngine::for_test();
+        let engine = Arc::new(engine);
         let (mut events, path) = event_log();
         let (jobs, queued) = mpsc::sync_channel(2);
         let mut pending = 0;
@@ -1385,6 +1387,7 @@ mod tests {
     #[test]
     fn a_model_that_cannot_stream_transcribes_the_whole_clip_after_release() {
         let (engine, commands) = TranscriptionEngine::for_test_without_streaming();
+        let engine = Arc::new(engine);
         let (mut events, path) = event_log();
         let (jobs, queued) = mpsc::sync_channel(2);
         let mut capture = DictationCapture::new(16_000);

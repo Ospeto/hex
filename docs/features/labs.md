@@ -10,7 +10,9 @@ into OpenRouter/Google transmission; off restores the saved local model. See
 ```ts
 Completed dictation                         // labs.openrouter-dictation
 ├── Off -> existing local transcription and insertion
-└── On -> discard speculative local stream -> bounded engine queue
+└── On -> discard speculative local stream -> bounded output admission
+    ├── Full/disconnected/dropped output job -> no engine request or upload
+    ├── Admitted worker consumes job -> enqueue cloud work on engine
     ├── Missing HEX_OPENROUTER_API_KEY -> clear failure, no upload
     ├── WAV in memory -> base64 input_audio -> chat/completions
     │   └── fixed google/gemini-3.5-flash-lite, no retry or fallback
@@ -24,16 +26,20 @@ required. Meetings, Annotate, host audio and History retranscription are not
 routed to this provider. Ten-minute request-audio cap, 1 MiB response cap and
 60-second request deadline are client safety limits, not advertised model
 limits. Source: `transcription/openrouter.rs`, `transcription/engine.rs`,
-`parakeet.rs`, `linux/dictation.rs`, `windows/dictation.rs`.
+`transcription/queued.rs`, `parakeet.rs`, `linux/dictation.rs`,
+`windows/dictation.rs`.
 
 Observed offline: the production client compiles in a standalone harness;
 four tests pass for WAV payload, exact model, complete text, invalid responses,
 HTTP auth/credit/rate failures and cancellation using a loopback fixture and an
-invented key. These are client-contract checks, not GUI or insertion proof.
+invented key. Three separate standalone queue tests pass: rejected full or
+disconnected queues, accepted jobs not yet consumed, and jobs discarded by a
+worker do not start deferred work. The engine-level admission/cancellation
+regression exists but has not run because native compilation is unavailable.
+These are offline contract checks, not full-app, GUI or insertion proof.
 Full Mac build is currently blocked by Command Line Tools lacking the
 FoundationModelsMacros plugin; live API, GUI insertion and installation have
 not been exercised. No private key or real audio was used.
-
 
 Labs holds features we're unsure about, **especially features people asked
 for that we built**: they land in Labs, off by default, instead of shipping

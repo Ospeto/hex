@@ -338,6 +338,14 @@ pub struct Transcribed {
     pub finish_ms: u64,
 }
 
+pub(crate) type QueuedTranscript = super::queued::Queued<Result<Transcribed, String>>;
+
+impl From<PendingTranscript> for QueuedTranscript {
+    fn from(pending: PendingTranscript) -> Self {
+        Self::new(move || pending.wait())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Source {
     Stream,
@@ -680,10 +688,6 @@ impl TranscriptionEngine {
     /// or when the stream is unusable, the clip is transcribed offline.
     #[cfg(not(target_os = "macos"))]
     pub fn finish(&self, stream: Option<LiveStream>, clip: Vec<f32>) -> Result<PendingTranscript> {
-        if crate::labs::openrouter_dictation() {
-            drop(stream);
-            return self.finish_openrouter(clip, || false);
-        }
         self.finish_with(
             stream,
             clip,
@@ -698,8 +702,43 @@ impl TranscriptionEngine {
         )
     }
 
-    /// Completed dictation only: no model activation or speculative local result.
-    pub(crate) fn finish_openrouter(
+    /// Snapshot dictation's provider before admission; only cloud work is lazy.
+    /// Local streams must still finish immediately, before the next capture.
+    #[cfg(not(target_os = "macos"))]
+    pub(crate) fn queue_dictation(
+        self: &Arc<Self>,
+        stream: Option<LiveStream>,
+        clip: Vec<f32>,
+    ) -> Result<QueuedTranscript> {
+        if crate::labs::openrouter_dictation() {
+            drop(stream);
+            Ok(self.queue_openrouter(clip, || false))
+        } else {
+            self.finish(stream, clip).map(QueuedTranscript::from)
+        }
+    }
+
+    /// The output queue must accept this job before its worker calls wait.
+    pub(crate) fn queue_openrouter(
+        self: &Arc<Self>,
+        clip: Vec<f32>,
+        canceled: impl Fn() -> bool + Send + 'static,
+    ) -> QueuedTranscript {
+        let engine = Arc::downgrade(self);
+        QueuedTranscript::new(move || {
+            if canceled() {
+                return Err("OpenRouter dictation was canceled before admission".into());
+            }
+            let engine = engine.upgrade().ok_or("transcription engine stopped")?;
+            engine
+                .finish_openrouter(clip, canceled)
+                .map_err(|error| error.to_string())?
+                .wait()
+        })
+    }
+
+    /// Runs only after admission: no model activation or speculative local result.
+    fn finish_openrouter(
         &self,
         clip: Vec<f32>,
         canceled: impl Fn() -> bool + Send + 'static,
@@ -1362,6 +1401,54 @@ mod tests {
         assert_eq!(Source::Stream.label(), "stream");
         assert_eq!(Source::Offline.label(), "offline");
         assert_eq!(Source::Fallback("x".into()).label(), "fallback");
+    }
+
+    #[test]
+    fn cloud_upload_is_queued_only_after_output_admission_and_not_after_cancellation() {
+        let (engine, commands) = TranscriptionEngine::for_test();
+        let engine = Arc::new(engine);
+        let (output, jobs) = mpsc::sync_channel(1);
+        assert!(
+            output
+                .try_send(engine.queue_openrouter(vec![0.1], || false))
+                .is_ok()
+        );
+        let rejected = output.try_send(engine.queue_openrouter(vec![0.2], || false));
+        assert!(matches!(rejected, Err(mpsc::TrySendError::Full(_))));
+        drop(rejected);
+        assert!(commands.try_recv().is_err());
+        drop(jobs);
+        let rejected = output.try_send(engine.queue_openrouter(vec![0.3], || false));
+        assert!(matches!(rejected, Err(mpsc::TrySendError::Disconnected(_))));
+        drop(rejected);
+        assert!(commands.try_recv().is_err());
+
+        let canceled = engine.queue_openrouter(vec![0.4], || true);
+        assert!(canceled.wait().is_err());
+        assert!(commands.try_recv().is_err());
+
+        let (output, jobs) = mpsc::sync_channel(1);
+        assert!(
+            output
+                .try_send(engine.queue_openrouter(vec![0.5], || false))
+                .is_ok()
+        );
+        let admitted = jobs.recv().unwrap();
+        assert!(commands.try_recv().is_err());
+        let worker = thread::spawn(move || admitted.wait());
+        match commands.recv_timeout(Duration::from_secs(5)).unwrap() {
+            Command::CloudDictation { clip, job, .. } => {
+                assert_eq!(clip, [0.5]);
+                // Complete at the engine boundary; this test never reaches HTTP.
+                job.finish(Ok(Transcribed {
+                    text: "admitted transcript".into(),
+                    source: Source::OpenRouter,
+                    finish_ms: 0,
+                }));
+            }
+            _ => panic!("expected one admitted cloud job"),
+        }
+        assert_eq!(worker.join().unwrap().unwrap().text, "admitted transcript");
     }
 
     #[test]

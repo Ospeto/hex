@@ -13,7 +13,7 @@ use crate::desktop::events::{
     DictationPhase, EventLog, TranscriptPhase, VoiceEvent, VoiceState, now_ms,
 };
 use crate::dictation::{DictationCapture, Finish, ReleaseWait};
-use crate::transcription::engine::{PendingTranscript, TranscriptionEngine};
+use crate::transcription::engine::{QueuedTranscript, TranscriptionEngine};
 use crate::transcription::local_transcriber::LocalTranscriber;
 use crate::transcription::models::TranscriptionSelection;
 use crate::windows::input::WindowsHotkey;
@@ -48,7 +48,7 @@ pub fn wake() {
 }
 
 struct Job {
-    transcript: PendingTranscript,
+    transcript: QueuedTranscript,
     audio_ms: u64,
     /// The clip, kept for History while Labs › Keep recordings is on.
     recording: Option<crate::history::Recording>,
@@ -1136,7 +1136,7 @@ fn submit_capture(
     capture: &mut DictationCapture,
     ended_at: CaptureInstant,
     tail: Duration,
-    engine: &TranscriptionEngine,
+    engine: &Arc<TranscriptionEngine>,
     jobs: &SyncSender<OutputJob>,
     events: &mut EventLog,
     pending: &mut usize,
@@ -1164,7 +1164,7 @@ fn submit_capture(
             let samples = clip.into_transcription_samples();
             let recording = crate::history::Recording::keep(&samples);
             let job = OutputJob::Dictation(Job {
-                transcript: engine.finish(stream, samples)?,
+                transcript: engine.queue_dictation(stream, samples)?,
                 audio_ms,
                 recording,
                 print,
