@@ -15,6 +15,8 @@ pub(super) fn table() -> &'static HashMap<&'static str, &'static str> {
 
 #[rustfmt::skip]
 const TRANSLATIONS: &[(&str, &str)] = &[
+    ("OpenRouter dictation", "Dictée OpenRouter"),
+    ("Send audio to OpenRouter/Google Gemini 3.5 Flash Lite after recording. Requires HEX_OPENROUTER_API_KEY, network access and usage charges. Local model stays selected for other features.", "Envoie l’audio à OpenRouter/Google Gemini 3.5 Flash Lite après l’enregistrement. Nécessite HEX_OPENROUTER_API_KEY, un accès à Internet et entraîne des frais d’utilisation. Le modèle local reste sélectionné pour les autres fonctions."),
     ("Your answer", "Votre réponse"),
     ("History retention", "Conservation de l'historique"),
     ("Earlier versions", "Versions précédentes"),
