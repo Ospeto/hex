@@ -453,7 +453,7 @@ impl Feature {
     pub const fn description(self) -> &'static str {
         match self {
             Self::OpenRouterDictation => {
-                "Send completed dictation audio to OpenRouter/Google Gemini 3.5 Flash Lite; requires HEX_OPENROUTER_API_KEY, network access and usage charges; transcribes after recording"
+                "Select Gemini 3.5 Flash Lite (OpenRouter) for completed dictation; save an API key in the Labs panel; requires network access and usage charges"
             }
             Self::Meetings => "Record calls and keep transcripts (its own pane)",
             Self::VoiceFilter => {

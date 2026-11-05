@@ -1520,6 +1520,44 @@ fn visible_untrusted_permission_rows_are_reported_for_legacy_cleanup() {
     }
 }
 
+#[test]
+fn openrouter_ui_goldens() {
+    let _goldens = Goldens::collect();
+    for dark in [true, false] {
+        for scene in [
+            "mac-openrouter-key",
+            "mac-openrouter-key-saved",
+            "picker-openrouter",
+            "mac-openrouter-settings",
+        ] {
+            check_golden(scene, dark, PANE_SIZE);
+        }
+    }
+}
+
+#[test]
+fn openrouter_picker_and_general_name_the_actual_dictation_choice() {
+    let rt = runtime("picker-openrouter", true, PANE_SIZE);
+    let copy = texts(&rt);
+    assert!(copy.iter().any(|text| text == picker::OPENROUTER_NAME));
+    assert_eq!(
+        copy.iter().filter(|text| text.as_str() == "In use").count(),
+        1
+    );
+    let rt = runtime("mac-openrouter-settings", true, PANE_SIZE);
+    assert!(
+        texts(&rt)
+            .iter()
+            .any(|text| text == picker::OPENROUTER_NAME)
+    );
+    assert!(
+        rt.find("transcription-download").is_none(),
+        "cloud selection offers no model download"
+    );
+    let rt = runtime("mac-openrouter-key", true, PANE_SIZE);
+    assert!(texts(&rt).iter().any(|text| text == "OpenRouter API key"));
+}
+
 /// The macOS and Windows surfaces in both appearances.
 #[test]
 fn platform_goldens() {

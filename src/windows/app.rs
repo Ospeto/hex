@@ -38,8 +38,8 @@ struct RunningListener {
     result: Receiver<ListenerResult>,
     worker: JoinHandle<()>,
     /// Saved settings the listener applies in place.
-    updates: mpsc::Sender<Box<AppSettings>>,
-    swap_failures: Receiver<crate::transcription::local_transcriber::SwapFailed>,
+    updates: mpsc::Sender<crate::windows::dictation::ListenerUpdate>,
+    outcomes: Receiver<crate::windows::dictation::ActivationOutcome>,
     /// The tray's and `hex` commands, handled as the shortcut would be.
     commands: mpsc::Sender<crate::windows::dictation::ListenerCommand>,
 }
@@ -76,6 +76,9 @@ pub(crate) struct WindowsDesktopHost {
     personal_commands: Option<crate::personal_commands::PersonalCommands>,
     personal_commands_checked_at: Instant,
     preparation: TranscriptionPreparation,
+    activation_generation: u64,
+    preparing_selection: Option<(u64, crate::transcription::models::TranscriptionSelection)>,
+    prepared_activation: Option<(u64, crate::transcription::models::TranscriptionSelection)>,
     keyboard_switcher: crate::transcription::keyboard_model_switching::Switcher,
     /// Present only while keyboard model switching is on.
     input_sources: Option<crate::keyboard_input_sources::Watcher>,
@@ -232,6 +235,9 @@ impl WindowsDesktopHost {
             personal_commands: None,
             personal_commands_checked_at: Instant::now(),
             preparation: TranscriptionPreparation::default(),
+            activation_generation: 0,
+            preparing_selection: None,
+            prepared_activation: None,
             keyboard_switcher,
             input_sources: None,
             automatic_preparation: false,
@@ -266,6 +272,7 @@ impl WindowsDesktopHost {
             Request::ChooseModel { model, language } => self.choose_model(model, language),
             Request::CancelModel => {
                 self.manual_choice();
+                self.cancel_pending_activation();
                 self.preparation.cancel();
             }
             Request::PasteLast => {
@@ -321,7 +328,12 @@ impl WindowsDesktopHost {
     fn choose_model(&mut self, model: TranscriptionModelId, language: String) {
         self.manual_choice();
         let selection = crate::transcription::models::TranscriptionSelection { model, language };
+        self.activation_generation += 1;
+        let generation = self.activation_generation;
+        self.prepared_activation = None;
+        self.preparing_selection = Some((generation, selection.clone()));
         self.preparation.start(selection, false);
+        self.send_listener_update();
     }
 
     /// A layout change not yet polled counts as before this choice, so it
@@ -338,6 +350,7 @@ impl WindowsDesktopHost {
         self.keyboard_switcher.manual_choice();
         if self.automatic_preparation {
             self.preparation.cancel();
+            self.cancel_pending_activation();
             self.automatic_preparation = false;
         }
     }
@@ -347,6 +360,7 @@ impl WindowsDesktopHost {
     fn supersede_automatic(&mut self) {
         if self.automatic_preparation {
             self.preparation.cancel();
+            self.cancel_pending_activation();
             self.automatic_preparation = false;
         }
     }
@@ -378,11 +392,17 @@ impl WindowsDesktopHost {
         if selection.model != self.settings.transcription.model
             || selection.language != self.settings.transcription.language
         {
+            self.activation_generation += 1;
+            let generation = self.activation_generation;
+            self.prepared_activation = None;
+            self.preparing_selection = Some((generation, selection.clone()));
             self.preparation.start(selection, true);
             self.automatic_preparation = true;
+            self.send_listener_update();
         } else {
             // The current model stays, but an older manual preparation must
             // not replace it.
+            self.cancel_pending_activation();
             self.preparation.cancel();
             self.automatic_preparation = false;
         }
@@ -407,12 +427,12 @@ impl WindowsDesktopHost {
         let worker_stop = stop.clone();
         let (result_sender, result_receiver) = mpsc::channel();
         let (updates, update_receiver) = mpsc::channel();
-        let (swap_failure_sender, swap_failures) = mpsc::channel();
+        let (outcomes_sender, outcomes) = mpsc::channel();
         let (commands, command_receiver) = mpsc::channel();
         let event_path = self.event_path.clone();
         let selection = self.runtime_selection();
         let config = crate::windows::dictation::WindowsDictationConfig {
-            swap_failures: Some(swap_failure_sender),
+            outcomes: Some(outcomes_sender),
             commands: Some(command_receiver),
             history: self.history.clone(),
             last_dictation: self.last_dictation.clone(),
@@ -443,13 +463,14 @@ impl WindowsDesktopHost {
                     result: result_receiver,
                     worker,
                     updates,
-                    swap_failures,
+                    outcomes,
                     commands,
                 });
                 self.session_before_start = self.activity.session_started_at;
                 self.awaiting_session_start = true;
                 self.status = "Enabling…".into();
                 self.error = None;
+                self.send_listener_update();
             }
             Err(error) => {
                 self.status = "Couldn't enable".into();
@@ -474,6 +495,8 @@ impl WindowsDesktopHost {
 
     pub(crate) fn stop(&mut self) {
         self.listen_when_ready = false;
+        self.cancel_pending_activation();
+        self.preparation.cancel();
         self.signal_stop("Disabling…");
     }
 
@@ -492,6 +515,11 @@ impl WindowsDesktopHost {
     /// listener reads changes in place; anything the listener captured at
     /// start restarts a running listener.
     fn apply_settings(&mut self, settings: &AppSettings) {
+        if settings.labs.openrouter_dictation && !self.settings.labs.openrouter_dictation {
+            self.manual_choice();
+            self.cancel_pending_activation();
+            self.preparation.cancel();
+        }
         if self
             .keyboard_switcher
             .configure(settings.keyboard_model_switching.clone(), Instant::now())
@@ -531,10 +559,81 @@ impl WindowsDesktopHost {
         // A running listener applies them in place, so listening never stops
         // for a settings change.
         if let Some(listener) = &self.listener {
-            let _ = listener.updates.send(Box::new(current.clone()));
+            let update = crate::windows::dictation::ListenerUpdate {
+                settings: Box::new(current.clone()),
+                generation: self.activation_generation,
+                activation: self.prepared_activation.as_ref().map(|(_, s)| s.clone()),
+            };
+            let _ = listener.updates.send(update);
         } else if model_changed && self.listen_when_ready {
             // A listener waiting for a model starts once one is chosen.
             self.start();
+        }
+    }
+
+    fn send_listener_update(&self) {
+        if let Some(listener) = &self.listener {
+            let update = crate::windows::dictation::ListenerUpdate {
+                settings: Box::new(self.settings.clone()),
+                generation: self.activation_generation,
+                activation: self.prepared_activation.as_ref().map(|(_, s)| s.clone()),
+            };
+            let _ = listener.updates.send(update);
+        }
+    }
+
+    fn cancel_pending_activation(&mut self) {
+        if self.preparing_selection.is_some() || self.prepared_activation.is_some() {
+            self.activation_generation += 1;
+            self.preparing_selection = None;
+            self.prepared_activation = None;
+            self.automatic_preparation = false;
+            self.send_listener_update();
+        }
+    }
+
+    fn handle_activation_outcome(&mut self, outcome: crate::windows::dictation::ActivationOutcome) {
+        if outcome.generation != self.activation_generation {
+            return;
+        }
+        let Some((_, target)) = self.prepared_activation.as_ref() else {
+            return;
+        };
+        let target = target.clone();
+        let listener_stopped = self
+            .listener
+            .as_ref()
+            .map_or(true, |l| l.stop.load(Ordering::Relaxed));
+        if listener_stopped {
+            self.cancel_pending_activation();
+            self.preparation.set_error(Some(
+                "Dictation listener is stopped; cannot activate model".into(),
+            ));
+            return;
+        }
+        match outcome.result {
+            Ok(()) => {
+                self.automatic_preparation = false;
+                let mut candidate = self.settings.clone();
+                candidate.remember_transcription(target);
+                candidate.labs.openrouter_dictation = false;
+                match candidate.save() {
+                    Ok(()) => {
+                        self.prepared_activation = None;
+                        self.apply_settings(&candidate);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not save activated transcription model");
+                        self.cancel_pending_activation();
+                        self.preparation
+                            .set_error(Some(format!("Could not save settings: {error:#}")));
+                    }
+                }
+            }
+            Err(error) => {
+                self.cancel_pending_activation();
+                self.preparation.set_error(Some(error));
+            }
         }
     }
 
@@ -542,23 +641,6 @@ impl WindowsDesktopHost {
     /// that can't run.
     fn runtime_selection(&self) -> crate::transcription::models::TranscriptionSelection {
         crate::transcription::custom_models::runnable(&self.settings.transcription)
-    }
-
-    /// The listener could not load a newly chosen model and still runs the
-    /// previous one. Settings go back to it, so they never name a model that
-    /// is not running and the picker never offers to delete the one in use.
-    fn keep_running_model(&mut self, failed: crate::transcription::local_transcriber::SwapFailed) {
-        // A choice made after the failed one stands.
-        if self.runtime_selection() != failed.wanted {
-            return;
-        }
-        let mut candidate = self.settings.clone();
-        candidate.remember_transcription(failed.kept);
-        match candidate.save() {
-            Ok(()) => self.apply_settings(&candidate),
-            Err(error) => tracing::warn!(%error, "could not restore the running model setting"),
-        }
-        self.preparation.set_error(Some(failed.error));
     }
 
     /// Hosts the personal transformations workspace while any mode uses a
@@ -597,26 +679,63 @@ impl WindowsDesktopHost {
     pub(crate) fn refresh(&mut self) {
         self.switch_with_keyboard();
         if let Some(result) = self.preparation.poll() {
-            self.automatic_preparation = false;
-            let result = result.and_then(|selection| {
-                crate::transcription::models::validate(&selection).map_err(|e| e.to_string())?;
-                let mut candidate = self.settings.clone();
-                candidate.remember_transcription(selection);
-                candidate.save().map_err(|e| format!("{e:#}"))?;
-                self.apply_settings(&candidate);
-                Ok(())
-            });
-            if let Err(error) = result {
-                self.preparation.set_error(Some(error));
+            match result {
+                Ok(selection) => {
+                    if let Err(e) = crate::transcription::models::validate(&selection) {
+                        self.cancel_pending_activation();
+                        self.preparation.set_error(Some(e.to_string()));
+                    } else if let Some((generation, preparing)) = self.preparing_selection.as_ref()
+                        && preparing == &selection
+                        && *generation == self.activation_generation
+                    {
+                        let generation = *generation;
+                        let listener_stopped = self
+                            .listener
+                            .as_ref()
+                            .map_or(true, |l| l.stop.load(Ordering::Relaxed));
+                        if !listener_stopped {
+                            self.prepared_activation = Some((generation, selection));
+                            self.preparing_selection = None;
+                            self.send_listener_update();
+                        } else if !self.settings.labs.openrouter_dictation {
+                            // Disabled/local-only setup keeps its existing artifact
+                            // preparation contract; validation must not open a microphone.
+                            let mut candidate = self.settings.clone();
+                            candidate.remember_transcription(selection);
+                            match candidate.save() {
+                                Ok(()) => {
+                                    self.preparing_selection = None;
+                                    self.automatic_preparation = false;
+                                    self.apply_settings(&candidate);
+                                }
+                                Err(error) => {
+                                    self.cancel_pending_activation();
+                                    self.preparation.set_error(Some(format!(
+                                        "Could not save settings: {error:#}"
+                                    )));
+                                }
+                            }
+                        } else {
+                            self.cancel_pending_activation();
+                            self.preparation.set_error(Some(
+                                "Dictation listener is stopped; cannot activate model".into(),
+                            ));
+                        }
+                    }
+                }
+                Err(error) => {
+                    self.cancel_pending_activation();
+                    self.preparation.set_error(Some(error));
+                }
             }
         }
-        let swap_failures = self
+        let outcomes = self
             .listener
             .as_ref()
-            .map(|listener| listener.swap_failures.try_iter().collect::<Vec<_>>())
+            .map(|listener| listener.outcomes.try_iter().collect::<Vec<_>>())
             .unwrap_or_default();
-        for failed in swap_failures {
-            self.keep_running_model(failed);
+        for outcome in outcomes {
+            self.handle_activation_outcome(outcome);
         }
         if self.listen_after_setup && crate::desktop::onboarding::completion_recorded() {
             self.listen_after_setup = false;
@@ -638,6 +757,11 @@ impl WindowsDesktopHost {
             };
             if let Some(result) = finished {
                 self.awaiting_session_start = false;
+                if self.preparing_selection.is_some() || self.prepared_activation.is_some() {
+                    self.cancel_pending_activation();
+                    self.preparation
+                        .set_error(Some("Listener stopped during model activation".into()));
+                }
                 if let Some(listener) = self.listener.take() {
                     let _ = listener.worker.join();
                 }
@@ -687,6 +811,18 @@ impl WindowsDesktopHost {
 
     pub(crate) fn publish(&self) -> Published {
         let preparation = self.preparation.status();
+        let preparing = preparation
+            .model
+            .or_else(|| self.preparing_selection.as_ref().map(|(_, s)| s.model))
+            .or_else(|| self.prepared_activation.as_ref().map(|(_, s)| s.model));
+        let preparation_stage = if preparation.model.is_some() || self.preparing_selection.is_some()
+        {
+            Some(ModelPreparationStage::Downloading)
+        } else if self.prepared_activation.is_some() {
+            Some(ModelPreparationStage::Loading)
+        } else {
+            None
+        };
         Published {
             activity: self.activity.state,
             listener: DesktopListenerSnapshot {
@@ -701,11 +837,9 @@ impl WindowsDesktopHost {
             transcription: DesktopTranscriptionSnapshot {
                 downloaded_bytes: preparation.downloaded_bytes,
                 error: preparation.error,
-                preparation_stage: preparation
-                    .model
-                    .map(|_| ModelPreparationStage::Downloading),
+                preparation_stage,
                 selection: self.settings.transcription.clone(),
-                preparing: preparation.model,
+                preparing,
             },
             update_status: self.updater.status(),
             update_notes: self.updater.notes(),

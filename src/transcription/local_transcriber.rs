@@ -696,6 +696,7 @@ type Loading = std::sync::mpsc::Receiver<std::result::Result<LocalTranscriber, S
 
 pub(crate) struct ModelSwap {
     loaded: TranscriptionSelection,
+    loaded_valid: bool,
     /// The device setting the running model loaded for.
     device: TranscriptionDevice,
     loading: Option<(TranscriptionSelection, TranscriptionDevice, Loading)>,
@@ -709,6 +710,7 @@ impl ModelSwap {
     pub(crate) fn new(loaded: &TranscriptionSelection) -> Self {
         Self {
             loaded: super::custom_models::runnable(loaded),
+            loaded_valid: true,
             device: device(),
             loading: None,
             ready: None,
@@ -731,6 +733,11 @@ impl ModelSwap {
                 .as_ref()
                 .map(|(selection, device, _)| (selection, *device)))
             .unwrap_or((&self.loaded, self.device))
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn loaded_selection(&self) -> &TranscriptionSelection {
+        &self.loaded
     }
 
     /// A model the host loaded for `selection` (Linux prepares models
@@ -770,12 +777,17 @@ impl ModelSwap {
         // default model meanwhile.
         let selection = super::custom_models::runnable(selection);
         let device = device();
-        if (&selection, device) == self.target() {
+        if (&selection, device) == self.target()
+            && (self.loaded_valid
+                || self.loading.is_some()
+                || self.ready.is_some()
+                || self.reload.is_some())
+        {
             return;
         }
         self.ready = None;
         self.reload = None;
-        if selection == self.loaded && device == self.device {
+        if self.loaded_valid && selection == self.loaded && device == self.device {
             self.loading = None;
             return;
         }
@@ -789,8 +801,23 @@ impl ModelSwap {
             });
         match spawned {
             Ok(_) => self.loading = Some((selection, device, receiver)),
-            Err(error) => tracing::warn!(%error, "could not load the new transcription model"),
+            Err(error) => {
+                tracing::warn!(%error, "could not load the new transcription model");
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let _ = sender.send(Err(format!(
+                    "could not start model loader thread: {error:#}"
+                )));
+                self.loading = Some((selection, device, receiver));
+            }
         }
+    }
+
+    /// Invalidates the loaded selection state so that the next `want` will
+    /// reload even if the target matches the previously loaded model.
+    /// Used when an in-place reload failed and the engine needs to restore its model.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub(crate) fn invalidate_loaded(&mut self) {
+        self.loaded_valid = false;
     }
 
     /// Collects a finished load; a failure keeps the current model.
@@ -817,22 +844,48 @@ impl ModelSwap {
         }
     }
 
-    /// The model to swap in now, if one is ready.
-    pub(crate) fn take_ready(&mut self) -> Option<LocalTranscriber> {
-        let (selection, transcriber) = self.ready.take()?;
+    /// Takes the ready transcriber and its selection without advancing `loaded`.
+    pub(crate) fn take_ready_unconfirmed(
+        &mut self,
+    ) -> Option<(TranscriptionSelection, LocalTranscriber)> {
+        self.ready.take()
+    }
+
+    /// Records successful installation of the selection.
+    pub(crate) fn confirm_selection(
+        &mut self,
+        selection: TranscriptionSelection,
+        device: TranscriptionDevice,
+    ) {
         self.loaded = selection;
-        self.device = transcriber.preference;
+        self.loaded_valid = true;
+        self.device = device;
+    }
+
+    /// The model to swap in now, if one is ready. Advances `loaded` immediately
+    /// for existing callers.
+    pub(crate) fn take_ready(&mut self) -> Option<LocalTranscriber> {
+        let (selection, transcriber) = self.take_ready_unconfirmed()?;
+        let preference = transcriber.preference;
+        self.confirm_selection(selection, preference);
         Some(transcriber)
     }
 
+    /// Takes the reload selection without advancing `loaded`.
+    pub(crate) fn take_reload_unconfirmed(
+        &mut self,
+    ) -> Option<(TranscriptionSelection, TranscriptionDevice)> {
+        self.reload.take()
+    }
+
     /// The selection the engine should load in place of its model, if the
-    /// GPU had no room for both ([`TranscriptionEngine::reload`]).
+    /// GPU had no room for both ([`TranscriptionEngine::reload`]). Advances
+    /// `loaded` immediately for existing callers.
     ///
     /// [`TranscriptionEngine::reload`]: crate::transcription::engine::TranscriptionEngine::reload
     pub(crate) fn take_reload(&mut self) -> Option<TranscriptionSelection> {
-        let (selection, device) = self.reload.take()?;
-        self.loaded = selection.clone();
-        self.device = device;
+        let (selection, device) = self.take_reload_unconfirmed()?;
+        self.confirm_selection(selection.clone(), device);
         Some(selection)
     }
 }
@@ -899,5 +952,21 @@ mod model_swap_tests {
         swap.want(&new);
         assert!(swap.loading.is_none());
         assert!(swap.take_ready().is_none());
+    }
+
+    #[test]
+    fn unconfirmed_taking_does_not_advance_loaded_until_confirmed() {
+        let old = TranscriptionSelection::default();
+        let new = TranscriptionSelection {
+            language: "fr".into(),
+            ..Default::default()
+        };
+        let mut swap = ModelSwap::new(&old);
+        swap.reload = Some((new.clone(), device()));
+        let unconfirmed = swap.take_reload_unconfirmed();
+        assert_eq!(unconfirmed, Some((new.clone(), device())));
+        assert_eq!(swap.loaded_selection(), &old);
+        swap.confirm_selection(new.clone(), device());
+        assert_eq!(swap.loaded_selection(), &new);
     }
 }

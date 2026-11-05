@@ -152,6 +152,11 @@ pub(super) const SCENES: &[Scene] = &[
         *ui = portal_fixture();
         picker::all_fixture(ui);
     }),
+    ("picker-openrouter", |ui| {
+        *ui = mac_fixture();
+        picker::all_fixture(ui);
+        ui.settings.labs.openrouter_dictation = true;
+    }),
     // Found on this computer: Parakeet v3's exact file and an untested Whisper.
     ("picker-found", |ui| {
         *ui = portal_fixture();
@@ -607,6 +612,18 @@ pub(super) const SCENES: &[Scene] = &[
         *ui = mac_fixture();
         ui.platform.developer = true;
         ui.pane = Pane::HudLab;
+    }),
+    ("mac-openrouter-key", |ui| {
+        *ui = mac_fixture();
+        openrouter_key::fixture(ui, false);
+    }),
+    ("mac-openrouter-key-saved", |ui| {
+        *ui = mac_fixture();
+        openrouter_key::fixture(ui, true);
+    }),
+    ("mac-openrouter-settings", |ui| {
+        *ui = mac_fixture();
+        ui.settings.labs.openrouter_dictation = true;
     }),
     ("mac-labs", labs_with_some_on),
     ("mac-labs-link", |ui| {

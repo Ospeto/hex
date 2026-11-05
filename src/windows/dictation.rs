@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::mpsc::{self, SyncSender, TryRecvError, TrySendError};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -110,11 +110,15 @@ pub struct WindowsDictationConfig {
     pub fallback_to_default_device: bool,
     /// Terminal paste: Ctrl+Shift+V instead of Ctrl+V.
     pub paste_with_shift: bool,
-    /// Where the listener reports a model change that failed to load.
-    pub swap_failures: Option<mpsc::Sender<crate::transcription::local_transcriber::SwapFailed>>,
+    /// Where the listener reports model activation outcomes.
+    pub outcomes: Option<mpsc::Sender<ActivationOutcome>>,
     /// What the tray asks of the listener.
     pub commands: Option<mpsc::Receiver<ListenerCommand>>,
 }
+
+mod activation;
+use activation::PendingReload;
+pub use activation::{ActivationOutcome, ListenerUpdate};
 
 /// A request from outside the keyboard hook, from the tray or a `hex`
 /// command (`crate::control::host`), handled as its shortcut would be.
@@ -130,56 +134,14 @@ pub enum ListenerCommand {
     StopAndPrint(PrintReply),
 }
 
-impl WindowsDictationConfig {
-    /// The listener configuration `settings` describe, with fresh runtime
-    /// state; a host swaps in the state it shares with the listener.
-    pub fn from_settings(settings: &crate::app_settings::AppSettings) -> Self {
-        Self {
-            device: settings.microphone.clone(),
-            hotkey: WindowsHotkey::from(&settings.dictation_hotkey),
-            paste_last_hotkey: settings.paste_last_hotkey.as_ref().map(WindowsHotkey::from),
-            raw_dictation_hotkey: settings
-                .raw_dictation_hotkey
-                .as_ref()
-                .map(WindowsHotkey::from),
-            annotate_hotkey: settings
-                .capture_on()
-                .then(|| WindowsHotkey::from(&settings.capture.hotkey)),
-            cancel_hotkey: settings.active_cancel_hotkey().map(WindowsHotkey::from),
-            double_tap_lock: settings.double_tap_lock,
-            double_tap_only: settings.double_tap_only,
-            shortcut_mode: settings.shortcut_mode,
-            share_dictation_shortcut: settings.share_dictation_shortcut,
-            while_dictating: settings.recording_audio_behavior,
-            release_microphone_while_idle: settings.release_microphone_while_idle,
-            feedback_volume: if settings.sound_effects {
-                (settings.sound_effect_volume.clamp(0.0, 1.0) * 100.0).round() as u8
-            } else {
-                0
-            },
-            sound_theme: settings.sound_theme,
-            history: None,
-            last_dictation: Arc::new(Mutex::new(None)),
-            indicator: None,
-            mode_runtime: Arc::new(RwLock::new(
-                crate::dictation::modes::ModeRuntime::from_settings(settings),
-            )),
-            transformations: Arc::new(crate::personal_commands::TransformationClient::default()),
-            fallback_to_default_device: true,
-            paste_with_shift: settings.paste_with_shift,
-            swap_failures: None,
-            commands: None,
-        }
-    }
-}
-
+mod config;
 /// Runs hotkey dictation until `shutdown`. Settings from `updates` apply in
 /// place while no dictation records, so changing one never stops listening.
 pub fn run(
     event_path: &Path,
     selection: &TranscriptionSelection,
     config: WindowsDictationConfig,
-    updates: mpsc::Receiver<Box<crate::app_settings::AppSettings>>,
+    updates: mpsc::Receiver<ListenerUpdate>,
     shutdown: &AtomicBool,
 ) -> Result<()> {
     let transcriber = LocalTranscriber::load(selection)?;
@@ -205,7 +167,7 @@ pub fn run(
         transformations,
         fallback_to_default_device,
         paste_with_shift,
-        swap_failures,
+        outcomes,
         commands,
     } = config;
     // Read by the output worker at each paste, so a change applies in place.
@@ -326,103 +288,368 @@ pub fn run(
         timestamp_ms: now_ms(),
     })?;
     emit_state(&mut events, VoiceState::Listening, &device_label)?;
+    let mut current_generation: u64 = 0;
+    let mut authoritative_transcription = crate::transcription::custom_models::runnable(&selection);
+    let mut active_activation: Option<(u64, TranscriptionSelection)> = None;
+    let mut pending_settings: Option<Box<crate::app_settings::AppSettings>> = None;
+    let mut pending_reload: Option<PendingReload> = None;
+    let mut engine_available = true;
+    let mut acknowledged_generation = None;
+
     println!(
         "Hex is ready on {}. Hold {} to dictate, release to paste; Ctrl-C stops.",
         device_label, hotkey_label
     );
 
     while !shutdown.load(Ordering::Relaxed) {
-        if let Some(failed) = model.poll() {
-            fail(&events, failed.error.clone())?;
-            if let Some(swap_failures) = &swap_failures {
-                let _ = swap_failures.send(failed);
+        if let Some(update) = updates.try_iter().last() {
+            current_generation = update.generation;
+            authoritative_transcription =
+                crate::transcription::custom_models::runnable(&update.settings.transcription);
+            active_activation = update.activation.map(|sel| {
+                (
+                    update.generation,
+                    crate::transcription::custom_models::runnable(&sel),
+                )
+            });
+            pending_settings = Some(update.settings);
+
+            if let Some((generation, target)) = &active_activation {
+                if acknowledged_generation != Some(*generation)
+                    && engine_available
+                    && pending_reload.is_none()
+                    && model.loaded_selection() == target
+                {
+                    let generation = *generation;
+                    acknowledged_generation = Some(generation);
+                    if let Some(outcomes) = &outcomes {
+                        let _ = outcomes.send(ActivationOutcome {
+                            generation: generation,
+                            result: Ok(()),
+                        });
+                    }
+                } else {
+                    model.want(target);
+                }
+            } else {
+                model.want(&authoritative_transcription);
             }
         }
+
+        if let Some(failed) = model.poll() {
+            fail(&events, failed.error.clone())?;
+            if let Some((generation, wanted)) = &active_activation {
+                if wanted == &failed.wanted && *generation == current_generation {
+                    let generation = *generation;
+                    active_activation = None;
+                    if let Some(outcomes) = &outcomes {
+                        let _ = outcomes.send(ActivationOutcome {
+                            generation: generation,
+                            result: Err(failed.error.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Some(task) = &pending_reload {
+            match task.receiver.try_recv() {
+                Ok(reload_result) => {
+                    let task = pending_reload.take().unwrap();
+                    match reload_result {
+                        Ok(()) => {
+                            model.confirm_selection(task.selection.clone(), task.device);
+                            engine_available = true;
+                            if let Some((generation, act_sel)) = &active_activation {
+                                if acknowledged_generation != Some(*generation)
+                                    && *generation == task.generation
+                                    && act_sel == &task.selection
+                                {
+                                    let generation = *generation;
+                                    acknowledged_generation = Some(generation);
+                                    if let Some(outcomes) = &outcomes {
+                                        let _ = outcomes.send(ActivationOutcome {
+                                            generation: generation,
+                                            result: Ok(()),
+                                        });
+                                    }
+                                }
+                            }
+                            let current_desired = active_activation
+                                .as_ref()
+                                .map(|(_, target)| target)
+                                .unwrap_or(&authoritative_transcription);
+                            if &task.selection != current_desired {
+                                model.want(current_desired);
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "in-place model reload failed");
+                            engine_available = false;
+                            model.invalidate_loaded();
+                            if let Some((generation, act_sel)) = &active_activation {
+                                if *generation == task.generation && act_sel == &task.selection {
+                                    let generation = *generation;
+                                    active_activation = None;
+                                    if let Some(outcomes) = &outcomes {
+                                        let _ = outcomes.send(ActivationOutcome {
+                                            generation: generation,
+                                            result: Err(error),
+                                        });
+                                    }
+                                }
+                            }
+                            model.want(
+                                active_activation
+                                    .as_ref()
+                                    .map(|(_, target)| target)
+                                    .unwrap_or(&authoritative_transcription),
+                            );
+                        }
+                    }
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => {
+                    let task = pending_reload.take().unwrap();
+                    let error = "model reload worker stopped unexpectedly".to_string();
+                    engine_available = false;
+                    model.invalidate_loaded();
+                    if let Some((generation, act_sel)) = &active_activation {
+                        if *generation == task.generation && act_sel == &task.selection {
+                            let generation = *generation;
+                            active_activation = None;
+                            if let Some(outcomes) = &outcomes {
+                                let _ = outcomes.send(ActivationOutcome {
+                                    generation: generation,
+                                    result: Err(error),
+                                });
+                            }
+                        }
+                    }
+                    model.want(
+                        active_activation
+                            .as_ref()
+                            .map(|(_, target)| target)
+                            .unwrap_or(&authoritative_transcription),
+                    );
+                }
+            }
+        }
+
         // Only the newest saved settings matter; they wait for a moment
         // without a recording.
-        if let Some(next) = updates.try_iter().last()
-            && !recording
-            && !start_pending
-            && finishing.is_none()
-        {
-            let next_config = WindowsDictationConfig::from_settings(&next);
-            paste_with_shift.store(next_config.paste_with_shift, Ordering::Relaxed);
-            let next_shortcuts = Shortcuts {
-                hotkey: next_config.hotkey,
-                paste_last_hotkey: next_config.paste_last_hotkey,
-                raw_dictation_hotkey: next_config.raw_dictation_hotkey,
-                annotate_hotkey: next_config.annotate_hotkey,
-                cancel_hotkey: next_config.cancel_hotkey,
-                double_tap_lock: next_config.double_tap_lock,
-                double_tap_only: next_config.double_tap_only,
-                shortcut_mode: next_config.shortcut_mode,
-                share_dictation_shortcut: next_config.share_dictation_shortcut,
-            };
-            if next_shortcuts != shortcuts {
-                // The old hook goes first; one keyboard hook runs at a time.
-                drop(hotkey);
-                held_event = None;
-                shortcuts = next_shortcuts;
-                hotkey = shortcuts.start()?;
-                toggle_mode = shortcuts.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
-            }
-            if next_config.while_dictating != while_dictating {
-                while_dictating = next_config.while_dictating;
-                audio_suppressor =
-                    crate::windows::audio_control::AudioSuppressor::start(while_dictating);
-            }
-            if next_config.device != device
-                || next_config.release_microphone_while_idle != release_while_idle
-            {
-                drop(input);
-                device = next_config.device;
-                release_while_idle = next_config.release_microphone_while_idle;
-                input = create_input(
-                    device.as_deref(),
-                    fallback_to_default_device,
-                    release_while_idle,
-                )?;
-                capture = DictationCapture::new(if input.is_open() {
-                    input.sample_rate()
-                } else {
-                    16_000
-                });
-                if !release_while_idle {
-                    captured_through = prime_microphone(&mut input, &mut capture, shutdown)?;
-                }
-                audio_ready = !release_while_idle;
-                device_label = if input.is_open() {
-                    input.device_name().to_string()
-                } else {
-                    device.clone().unwrap_or_else(|| "System default".into())
+        if !recording && !start_pending && finishing.is_none() {
+            if let Some(next) = pending_settings.take() {
+                let next_config = WindowsDictationConfig::from_settings(&next);
+                paste_with_shift.store(next_config.paste_with_shift, Ordering::Relaxed);
+                let next_shortcuts = Shortcuts {
+                    hotkey: next_config.hotkey,
+                    paste_last_hotkey: next_config.paste_last_hotkey,
+                    raw_dictation_hotkey: next_config.raw_dictation_hotkey,
+                    annotate_hotkey: next_config.annotate_hotkey,
+                    cancel_hotkey: next_config.cancel_hotkey,
+                    double_tap_lock: next_config.double_tap_lock,
+                    double_tap_only: next_config.double_tap_only,
+                    shortcut_mode: next_config.shortcut_mode,
+                    share_dictation_shortcut: next_config.share_dictation_shortcut,
                 };
-                emit_current_state(&mut events, recording, pending, &device_label)?;
+                if next_shortcuts != shortcuts {
+                    // The old hook goes first; one keyboard hook runs at a time.
+                    drop(hotkey);
+                    held_event = None;
+                    shortcuts = next_shortcuts;
+                    hotkey = shortcuts.start()?;
+                    toggle_mode = shortcuts.shortcut_mode == crate::dictation::ShortcutMode::Toggle;
+                }
+                if next_config.while_dictating != while_dictating {
+                    while_dictating = next_config.while_dictating;
+                    audio_suppressor =
+                        crate::windows::audio_control::AudioSuppressor::start(while_dictating);
+                }
+                if next_config.device != device
+                    || next_config.release_microphone_while_idle != release_while_idle
+                {
+                    drop(input);
+                    device = next_config.device;
+                    release_while_idle = next_config.release_microphone_while_idle;
+                    input = create_input(
+                        device.as_deref(),
+                        fallback_to_default_device,
+                        release_while_idle,
+                    )?;
+                    capture = DictationCapture::new(if input.is_open() {
+                        input.sample_rate()
+                    } else {
+                        16_000
+                    });
+                    if !release_while_idle {
+                        captured_through = prime_microphone(&mut input, &mut capture, shutdown)?;
+                    }
+                    audio_ready = !release_while_idle;
+                    device_label = if input.is_open() {
+                        input.device_name().to_string()
+                    } else {
+                        device.clone().unwrap_or_else(|| "System default".into())
+                    };
+                    emit_current_state(&mut events, recording, pending, &device_label)?;
+                }
             }
-            model.want(&next.transcription);
         }
         // A GPU without room for two copies: the engine swaps in place.
         if !recording
             && !start_pending
             && finishing.is_none()
             && pending == 0
-            && let Some(selection) = model.take_reload()
-            && let Err(error) = engine.reload(selection)
+            && pending_reload.is_none()
+            && let Some((selection, device)) = model.take_reload_unconfirmed()
         {
-            tracing::warn!(%error, "could not replace the transcription model");
+            if let Some(update) = updates.try_iter().last() {
+                current_generation = update.generation;
+                authoritative_transcription =
+                    crate::transcription::custom_models::runnable(&update.settings.transcription);
+                active_activation = update.activation.map(|sel| {
+                    (
+                        update.generation,
+                        crate::transcription::custom_models::runnable(&sel),
+                    )
+                });
+                pending_settings = Some(update.settings);
+            }
+            let desired = active_activation
+                .as_ref()
+                .map(|(_, target)| target)
+                .unwrap_or(&authoritative_transcription);
+            if &selection == desired {
+                engine_available = false;
+                match engine.reload_confirmed(selection.clone()) {
+                    Ok(receiver) => {
+                        pending_reload = Some(PendingReload {
+                            generation: current_generation,
+                            selection,
+                            device,
+                            receiver,
+                        });
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not reload transcription model");
+                        let error_msg = format!("could not reload transcription model: {error:#}");
+                        if let Some((generation, act_sel)) = &active_activation {
+                            if *generation == current_generation && act_sel == &selection {
+                                let generation = *generation;
+                                active_activation = None;
+                                if let Some(outcomes) = &outcomes {
+                                    let _ = outcomes.send(ActivationOutcome {
+                                        generation: generation,
+                                        result: Err(error_msg.clone()),
+                                    });
+                                }
+                            }
+                        }
+                        model.invalidate_loaded();
+                        model.want(&authoritative_transcription);
+                    }
+                }
+            } else {
+                model.want(desired);
+            }
         }
         if !recording
             && !start_pending
             && finishing.is_none()
             && pending == 0
-            && let Some(next) = model.take_ready()
+            && pending_reload.is_none()
+            && let Some((selection, next)) = model.take_ready_unconfirmed()
         {
-            let old = std::mem::replace(&mut engine, Arc::new(TranscriptionEngine::start(next)?));
-            engine.share();
-            crate::capture_host::use_engine(&engine);
-            // A request on the local API or a capture still transcribing
-            // holds the old engine a moment.
-            if let Ok(old) = Arc::try_unwrap(old) {
-                old.retire();
+            if let Some(update) = updates.try_iter().last() {
+                current_generation = update.generation;
+                authoritative_transcription =
+                    crate::transcription::custom_models::runnable(&update.settings.transcription);
+                active_activation = update.activation.map(|sel| {
+                    (
+                        update.generation,
+                        crate::transcription::custom_models::runnable(&sel),
+                    )
+                });
+                pending_settings = Some(update.settings);
+            }
+            let desired = active_activation
+                .as_ref()
+                .map(|(_, target)| target)
+                .unwrap_or(&authoritative_transcription);
+            if &selection == desired {
+                let preference = next.preference;
+                match TranscriptionEngine::start(next) {
+                    Ok(new_engine) => {
+                        if let Some(update) = updates.try_iter().last() {
+                            current_generation = update.generation;
+                            authoritative_transcription =
+                                crate::transcription::custom_models::runnable(
+                                    &update.settings.transcription,
+                                );
+                            active_activation = update.activation.map(|sel| {
+                                (
+                                    update.generation,
+                                    crate::transcription::custom_models::runnable(&sel),
+                                )
+                            });
+                            pending_settings = Some(update.settings);
+                        }
+                        let desired = active_activation
+                            .as_ref()
+                            .map(|(_, target)| target)
+                            .unwrap_or(&authoritative_transcription);
+                        if &selection == desired {
+                            let old = std::mem::replace(&mut engine, Arc::new(new_engine));
+                            engine.share();
+                            crate::capture_host::use_engine(&engine);
+                            // A request on the local API or a capture still transcribing
+                            // holds the old engine a moment.
+                            if let Ok(old) = Arc::try_unwrap(old) {
+                                old.retire();
+                            }
+                            model.confirm_selection(selection.clone(), preference);
+                            engine_available = true;
+                            if let Some((generation, act_sel)) = &active_activation {
+                                if acknowledged_generation != Some(*generation)
+                                    && *generation == current_generation
+                                    && act_sel == &selection
+                                {
+                                    let generation = *generation;
+                                    acknowledged_generation = Some(generation);
+                                    if let Some(outcomes) = &outcomes {
+                                        let _ = outcomes.send(ActivationOutcome {
+                                            generation: generation,
+                                            result: Ok(()),
+                                        });
+                                    }
+                                }
+                            }
+                        } else {
+                            new_engine.retire();
+                            model.want(desired);
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "could not start transcription engine with new model");
+                        let error_msg = format!("could not start transcription engine: {error:#}");
+                        if let Some((generation, act_sel)) = &active_activation {
+                            if *generation == current_generation && act_sel == &selection {
+                                let generation = *generation;
+                                active_activation = None;
+                                if let Some(outcomes) = &outcomes {
+                                    let _ = outcomes.send(ActivationOutcome {
+                                        generation: generation,
+                                        result: Err(error_msg.clone()),
+                                    });
+                                }
+                            }
+                        }
+                        let _ = fail(&events, error_msg);
+                    }
+                }
+            } else {
+                drop(next);
+                model.want(desired);
             }
         }
         crate::capture_host::CaptureHost::reconcile(
@@ -1011,24 +1238,6 @@ struct Shortcuts {
     double_tap_only: bool,
     shortcut_mode: crate::dictation::ShortcutMode,
     share_dictation_shortcut: bool,
-}
-
-impl Shortcuts {
-    fn start(&self) -> Result<WindowsHotkeyMonitor> {
-        // Double-tap-only depends on the double-tap window; without the lock
-        // there is no second tap to wait for.
-        WindowsHotkeyMonitor::start(
-            self.hotkey.clone(),
-            self.paste_last_hotkey.clone(),
-            self.raw_dictation_hotkey.clone(),
-            self.annotate_hotkey.clone(),
-            self.cancel_hotkey.clone(),
-            self.double_tap_lock,
-            self.double_tap_lock && self.double_tap_only,
-            self.shortcut_mode,
-            self.share_dictation_shortcut,
-        )
-    }
 }
 
 fn prime_microphone(

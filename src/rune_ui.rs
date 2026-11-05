@@ -43,6 +43,7 @@ mod models;
 mod modes;
 mod onboarding;
 mod onboarding_kit;
+mod openrouter_key;
 mod output;
 mod paste_access;
 mod picker;
@@ -681,6 +682,7 @@ pub(crate) struct Ui {
     models: models::Models,
     history: history::HistoryPane,
     modes: modes::ModesPane,
+    openrouter_key: openrouter_key::OpenRouterKeyState,
     output: output::OutputPane,
     picker: picker::Picker,
     /// Speech models already on this computer, and choosing one.
@@ -794,6 +796,7 @@ impl Ui {
             models: models::Models::default(),
             history: history::HistoryPane::default(),
             modes,
+            openrouter_key: openrouter_key::OpenRouterKeyState::default(),
             output: output::OutputPane::default(),
             picker: picker::Picker::default(),
             found: found::FoundState::default(),
@@ -1082,6 +1085,7 @@ impl Ui {
     /// Switches panes at once: the new pane replaces the old without a fade,
     /// already at rest (a grant's morph doesn't replay).
     fn select_pane(&mut self, pane: Pane, tx: &mut Tx) {
+        self.openrouter_key.clear_draft();
         let labs = std::mem::take(&mut self.labs_open);
         if self.pane == pane && !labs {
             return;
@@ -1261,6 +1265,7 @@ fn poll(ui: &mut Ui, clock: f64, tx: &mut Tx) -> bool {
     changed |= ui.modes.poll(ui.live());
     changed |= modes::poll_chooser(ui);
     changed |= model_import::poll(ui);
+    changed |= openrouter_key::poll(ui);
     changed |= found::poll(ui);
     let login_unknown = ui.platform.login_item.is_none();
     changed |= settings::poll_microphones(ui);

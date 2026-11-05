@@ -19,6 +19,13 @@ const PROGRESS_WIDTH: f32 = 196.0;
 
 pub(super) fn body(ui: &Ui, p: Paint, entries: &[Entry], language: &str) -> El {
     let mut body = col().key("all-view").px(16.0).pb(16.0);
+    if crate::labs::Feature::OpenRouterDictation.shipped()
+        && crate::labs::Feature::OpenRouterDictation
+            .managed()
+            .is_none()
+    {
+        body = body.child(openrouter_row(ui, p));
+    }
     // Files other apps downloaded that aren't catalog models; a catalog
     // one shows on its own row. Labs › Downloaded models only leaves them out.
     if !picker::downloaded_filter(ui)
@@ -50,6 +57,42 @@ pub(super) fn body(ui: &Ui, p: Paint, entries: &[Entry], language: &str) -> El {
         }
     }
     body
+}
+
+fn openrouter_row(ui: &Ui, p: Paint) -> El {
+    let active = picker::cloud_selected(ui);
+    col()
+        .key("openrouter-model-group")
+        .child(group_label(p, "cloud-heading", tr("Cloud"), true).px(0.0))
+        .child(
+            row()
+                .key("openrouter-model")
+                .role("button")
+                .label(picker::OPENROUTER_NAME)
+                .description(if active { tr("In use") } else { tr("Use") })
+                .min_h(76.0)
+                .py(12.0)
+                .gap(16.0)
+                .center_y()
+                .hover(p.k.c.hover)
+                .on_press(picker::choose_openrouter)
+                .child(
+                    col()
+                        .key("description")
+                        .grow(1.0)
+                        .shrink()
+                        .min_w(0.0)
+                        .gap(3.0)
+                        .child(text(picker::OPENROUTER_NAME).key("name").font(p.k.ty.body_medium).color(p.text()).wrap())
+                        .child(text(tr("Transcribes after recording · API key required · No download"))
+                            .key("detail").font(p.k.ty.small).color(p.muted()).wrap())
+                        .child(text(tr("Audio is sent to OpenRouter/Google; network access and usage charges apply"))
+                            .key("privacy").font(p.k.ty.small).color(p.muted()).wrap()),
+                )
+                .child(text(if active { tr("In use") } else { tr("Use") })
+                    .key("state").font(p.k.ty.ui).color(if active { p.accent() } else { p.text() })),
+        )
+        .child(el().key("rule").h(p.hair).w_full().fill(p.k.c.border_weak))
 }
 
 const SPEAKING: &str = "speaking";

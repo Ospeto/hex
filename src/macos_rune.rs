@@ -720,6 +720,10 @@ impl Runtime {
     fn reload_settings(&mut self) {
         match AppSettings::load() {
             Ok(settings) => {
+                if settings.labs.openrouter_dictation && !self.settings.labs.openrouter_dictation {
+                    self.manual_choice();
+                    self.preparation.cancel();
+                }
                 if self
                     .keyboard_switcher
                     .configure(settings.keyboard_model_switching.clone(), Instant::now())

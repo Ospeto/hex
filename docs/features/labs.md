@@ -4,8 +4,23 @@
 
 `labs.openrouter_dictation` is off by default (audience Everyone).
 `hex labs on openrouter-dictation` or the Labs switch opts completed dictations
-into OpenRouter/Google transmission; off restores the saved local model. See
-[configuration and privacy](../../README.md#openrouter-dictation-optional).
+into OpenRouter/Google transmission; off restores the saved local model. The
+All speech models picker's Gemini 3.5 Flash Lite (OpenRouter) row controls this
+same persisted choice, not a second provider setting; it downloads nothing.
+General and the picker name the cloud choice while on; local choices remain
+available, and a successfully prepared local selection turns it off.
+
+The Labs detail panel has a masked key field, explicit save/replace/remove and
+missing/saved/environment/error status. Worker-only OS credential access uses
+macOS Keychain, Windows Credential Manager, or Linux Secret Service. Saved keys
+win over `HEX_OPENROUTER_API_KEY`; removal also persists a non-secret
+`environment-disabled` marker in the credential store, preventing an inherited
+key from silently returning. Saving again overrides that marker. Hex Test's
+service is separate from Hex; no saved key is returned to UI/settings/status.
+Missing/error credentials guide a picker selection back to this panel and never
+fall back locally. See [configuration and privacy](../../README.md#openrouter-dictation-optional).
+Source: `transcription/openrouter/credentials.rs`, `rune_ui/openrouter_key.rs`,
+`rune_ui/labs/drawer.rs`, `rune_ui/picker.rs`, `rune_ui/picker/list.rs`.
 
 ```ts
 Completed dictation                         // labs.openrouter-dictation
@@ -13,7 +28,7 @@ Completed dictation                         // labs.openrouter-dictation
 └── On -> discard speculative local stream -> bounded output admission
     ├── Full/disconnected/dropped output job -> no engine request or upload
     ├── Admitted worker consumes job -> enqueue cloud work on engine
-    ├── Missing HEX_OPENROUTER_API_KEY -> clear failure, no upload
+    ├── Missing key / credential-store failure -> clear failure, no upload
     ├── WAV in memory -> base64 input_audio -> chat/completions
     │   └── fixed google/gemini-3.5-flash-lite, no retry or fallback
     ├── Complete plain text -> existing processing and ordered output
@@ -62,7 +77,7 @@ Feature             Pane  Toggle (settings.json, hex settings)   On: what it doe
 ├── Meetings (beta) yes   meetings.enabled             (macOS)   Meetings joins the sidebar: call detection, recording, transcripts
 ├── Voice Filter    yes   experimental.hex_microphone  (macOS, Linux) Voice Filter joins the sidebar; feeds the Hex Microphone (macOS driver, Linux PipeWire source)
 ├── Playground      yes   labs.playground                        a Playground sidebar item and ⇧⌘D open the story browser
-├── OpenRouter dictation no labs.openrouter_dictation (all OSes) completed dictation audio goes to OpenRouter/Google Gemini 3.5 Flash Lite; requires an app-scoped environment key, network and usage charges
+├── OpenRouter dictation no labs.openrouter_dictation (all OSes) completed dictation audio goes to OpenRouter/Google Gemini 3.5 Flash Lite; masked key entry with OS credential persistence, or app-scoped environment fallback; network and usage charges
 ├── Live text       no    labs.live_text                         provisional words beside the HUD while dictating
 ├── Live chapters   no    labs.live_chapters           (macOS)   chapters a meeting while it records, boundary pass after Stop
 ├── Vocabulary biasing no labs.vocabulary_biasing                Parakeet transcription biased toward the vocabulary (#452/#457)

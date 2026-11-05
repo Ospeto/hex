@@ -107,6 +107,7 @@ const CONTROLS: &[&str] = &[
     "radio-button",
     "combo-box",
     "text-input",
+    "password-input",
     "search-input",
     "multiline-text-input",
     "slider",
@@ -216,6 +217,34 @@ fn settings_switches_say_whether_they_are_on() {
     settle(&mut rt);
     assert_eq!(rt.state.settings.release_microphone_while_idle, !release);
     assert_eq!(on(&node(&rt, "microphone-mode")), !release);
+}
+
+#[test]
+fn an_openrouter_key_is_never_exposed_to_accessibility() {
+    // Offscreen fixture input only: no system clipboard, vault or network.
+    const SENTINEL: &str = "synthetic-openrouter-accessibility-sentinel";
+    let mut rt = runtime("mac-openrouter-key");
+    let input = node(&rt, "openrouter-key-input");
+    assert_eq!(name(&input), "OpenRouter API key");
+    let (x, y) = rt.find("openrouter-key-input").expect("key field is drawn");
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    settle(&mut rt);
+    assert!(rt.has_secure_focus());
+    rt.paste(SENTINEL);
+    settle(&mut rt);
+    assert!(!rt.accessibility_json().to_string().contains(SENTINEL));
+    assert!(
+        !states(&node(&rt, "openrouter-save-key")).contains(&"disabled"),
+        "paste reaches the masked draft"
+    );
+    assert!(rt.accessibility_action("openrouter-save-key", Action::Click, None));
+    settle(&mut rt);
+    assert!(!rt.accessibility_json().to_string().contains(SENTINEL));
+    assert!(
+        states(&node(&rt, "openrouter-save-key")).contains(&"disabled"),
+        "saving clears the draft"
+    );
 }
 
 /// A choice reads as what it chooses, with the current choice as its value.

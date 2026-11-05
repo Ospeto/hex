@@ -137,7 +137,10 @@ pub(crate) enum Command {
     /// Drops the model, then loads `selection` in its place, for a GPU with
     /// no room for both (#1170).
     #[cfg_attr(target_os = "macos", allow(dead_code))]
-    Reload(crate::transcription::models::TranscriptionSelection),
+    Reload {
+        selection: crate::transcription::models::TranscriptionSelection,
+        completion: Option<SyncSender<std::result::Result<(), String>>>,
+    },
     Background {
         /// The dictation generation when the work was submitted.
         generation: u64,
@@ -849,8 +852,28 @@ impl TranscriptionEngine {
         selection: crate::transcription::models::TranscriptionSelection,
     ) -> Result<()> {
         self.commands
-            .send(Command::Reload(selection))
+            .send(Command::Reload {
+                selection,
+                completion: None,
+            })
             .map_err(|_| eyre!("transcription engine stopped"))
+    }
+
+    /// Replaces the model in place and provides a receiver that completes
+    /// once the model is reloaded or failed.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn reload_confirmed(
+        &self,
+        selection: crate::transcription::models::TranscriptionSelection,
+    ) -> Result<Receiver<std::result::Result<(), String>>> {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.commands
+            .send(Command::Reload {
+                selection,
+                completion: Some(sender),
+            })
+            .map_err(|_| eyre!("transcription engine stopped"))?;
+        Ok(receiver)
     }
 
     /// Drops the engine on its own thread, so replacing the model from the
@@ -1111,13 +1134,35 @@ impl Worker {
                     }
                     self.publish_streams();
                 }
-                Command::Reload(selection) => {
+                Command::Reload {
+                    selection,
+                    completion,
+                } => {
                     tracing::info!(model = ?selection.model, "replacing the speech model in place");
                     self.model = None;
-                    self.parked = Some(selection);
-                    // A failed load stays parked; the next command tries again.
-                    let _ = self.model();
+                    self.parked = Some(selection.clone());
+                    let started = Instant::now();
+                    let result = match reload(&selection) {
+                        Ok(model) => {
+                            tracing::info!(
+                                model = ?selection.model,
+                                load_ms = started.elapsed().as_millis(),
+                                "reloaded the speech model"
+                            );
+                            self.model = Some(model);
+                            self.parked = None;
+                            Ok(())
+                        }
+                        Err(error) => {
+                            tracing::warn!(%error, "could not reload the speech model");
+                            Err(format!("{error:#}"))
+                        }
+                    };
                     self.publish_streams();
+                    self.publish_selection();
+                    if let Some(completion) = completion {
+                        let _ = completion.send(result);
+                    }
                 }
                 Command::Background { generation, work } => {
                     let current = self.requests.load(Ordering::Acquire) == generation;

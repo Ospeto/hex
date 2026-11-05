@@ -524,6 +524,7 @@ impl AppSettings {
         crate::transcription::models::validate(&selection)?;
         let mut candidate = self.clone();
         candidate.remember_transcription(selection);
+        candidate.labs.openrouter_dictation = false;
         self.commit_with(candidate, save)
     }
 
@@ -2199,6 +2200,7 @@ mod tests {
     #[test]
     fn failed_model_selection_save_preserves_selection_recents_and_unsaved_edits() {
         let mut settings = AppSettings::default();
+        settings.labs.openrouter_dictation = true;
         settings.dictation_processing.default_mode.name = "Unsaved mode".into();
         let before = serde_json::to_value(&settings).unwrap();
         let candidate = TranscriptionSelection {
@@ -2218,6 +2220,10 @@ mod tests {
             .save_transcription_with(candidate.clone(), |_| Ok(()))
             .unwrap();
         assert_eq!(settings.transcription, candidate);
+        assert!(
+            !settings.labs.openrouter_dictation,
+            "successful local selection restores local routing"
+        );
         assert_eq!(
             settings.dictation_processing.default_mode.name,
             "Unsaved mode"

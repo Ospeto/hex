@@ -1,5 +1,7 @@
 //! Completed dictation clips only. Meetings, Annotate and host audio stay local.
 
+pub(crate) mod credentials;
+
 use std::io::{self, Cursor, Read};
 use std::time::Duration;
 
@@ -16,15 +18,10 @@ const MAX_RESPONSE: u64 = 1024 * 1024;
 
 pub(crate) fn transcribe(samples: &[f32], canceled: &impl Fn() -> bool) -> Result<String, String> {
     check(canceled)?;
-    let key = std::env::var(KEY_ENV)
-        .ok()
-        .filter(|key| !key.trim().is_empty())
-        .ok_or_else(|| {
-            format!("OpenRouter needs {KEY_ENV} in Hex's launch environment. See README.")
-        })?;
-    if key.chars().any(char::is_control) {
-        return Err(format!("OpenRouter: {KEY_ENV} contains invalid characters"));
-    }
+    let key = credentials::load()?.ok_or_else(|| {
+        "OpenRouter needs an API key saved in Labs or supplied through HEX_OPENROUTER_API_KEY"
+            .to_owned()
+    })?;
     let body = request(samples, canceled)?;
     let agent = crate::net::agent(ENDPOINT, |config| {
         config

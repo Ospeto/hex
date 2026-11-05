@@ -41,7 +41,10 @@ Settings window                               // a11y.window
 ├── Speech model picker -> a modal dialog named by its title       // a11y.picker
 │   ├── The window behind it leaves the tree while it is open
 │   ├── Compare -> one group per model column, named by the model
-│   └── Every model -> lists per group, each model a list item with its place
+│   └── Every model -> lists per group, each local model a list item with its place;
+│       this fork's OpenRouter choice is a named selection button
+├── OpenRouter Labs key panel -> named secure password input; saved secrets never
+│   enter the tree; save/replace/remove and status are named       // a11y.openrouter-key
 └── Icon-only buttons -> named (Close, Copy, Delete, Remove, Back, More, …)
 ```
 
@@ -64,6 +67,13 @@ focus action, or a control role, has a non-empty name),
 `the_model_picker_is_a_named_modal_dialog`, and
 `the_pane_title_is_its_heading`. They run on every OS in CI. They read the tree
 Rune would send; they don't prove what a screen reader says.
+
+This fork adds `an_openrouter_key_is_never_exposed_to_accessibility`: an
+offscreen synthetic paste must focus a secure input, enable Save, stay absent
+from the accessibility JSON and clear after fixture Save. It never reads the
+system clipboard or vault and makes no network request. Source:
+[openrouter_key.rs](../../src/rune_ui/openrouter_key.rs). This check and the
+empty/saved-status scenes are not native password-manager or live VoiceOver proof.
 
 ## HUD and capsules
 

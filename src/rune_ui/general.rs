@@ -117,7 +117,11 @@ fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
         p,
         "transcription-control",
         tr("Speech model"),
-        model.name,
+        if super::picker::cloud_selected(ui) {
+            super::picker::OPENROUTER_NAME
+        } else {
+            model.name
+        },
         &rune_theme_opencode::icons::CHEVRON_RIGHT,
         super::picker::open,
     );
@@ -169,6 +173,10 @@ fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
             };
             (Some(description), controls.child(picker_button))
         }
+        None if super::picker::cloud_selected(ui) => (
+            Some((tr("Audio is sent to OpenRouter/Google after recording; network access and usage charges apply").to_owned(), p.muted())),
+            picker_button,
+        ),
         None => (s::transcription_status(ui, p), picker_button),
     };
     rows.push(
@@ -182,7 +190,9 @@ fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
         )
         .into(),
     );
-    rows.extend(language_row(ui, p, layer).map(CardRow::from));
+    if !super::picker::cloud_selected(ui) {
+        rows.extend(language_row(ui, p, layer).map(CardRow::from));
+    }
     let vocabulary_note = super::vocabulary::unused_note(ui);
     rows.push(
         icon_row(
@@ -212,6 +222,11 @@ fn basics(ui: &Ui, p: Paint, layer: &mut Vec<El>) -> El {
 /// Hex can't listen yet. Fixtures that name no installed models say nothing,
 /// so their rows never depend on this machine's models.
 pub(super) fn missing_model(ui: &Ui) -> Option<crate::desktop::onboarding::ModelProgress> {
+    // The cloud choice has no model artifact; the remembered local model still
+    // belongs to meetings and other local-only features.
+    if super::picker::cloud_selected(ui) {
+        return None;
+    }
     if !ui.live() && ui.picker.installed.is_none() {
         return None;
     }

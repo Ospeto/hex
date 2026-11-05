@@ -31,6 +31,30 @@ use crate::transcription::models::{
     TranscriptionSelection, language_name,
 };
 
+pub(super) const OPENROUTER_NAME: &str = "Gemini 3.5 Flash Lite (OpenRouter)";
+
+/// The persisted Labs choice is also the picker and dictation routing choice.
+pub(super) fn cloud_selected(ui: &Ui) -> bool {
+    let feature = crate::labs::Feature::OpenRouterDictation;
+    feature.shipped() && feature.managed().is_none() && feature.on(&ui.settings)
+}
+
+pub(super) fn choose_openrouter(ui: &mut Ui) {
+    if crate::labs::Feature::OpenRouterDictation
+        .managed()
+        .is_some()
+    {
+        return;
+    }
+    // A local preparation accepted before this choice must not replace it later.
+    ui.send(Request::CancelModel);
+    if ui.update(|settings| settings.labs.openrouter_dictation = true) {
+        ui.picker.fallback = None;
+        close(ui);
+        super::openrouter_key::refresh(ui, true);
+    }
+}
+
 const PANEL_WIDTH: f32 = compare::WIDTH;
 /// The full list's height: the window's less a margin above and below.
 const PANEL_HEIGHT: f32 = 680.0;
@@ -145,7 +169,11 @@ pub(super) fn open(ui: &mut Ui) {
     ui.picker.sort = Sort::default();
     ui.picker.supported_only = false;
     ui.picker.downloaded_only = false;
-    ui.picker.view = View::Compare;
+    ui.picker.view = if cloud_selected(ui) {
+        View::All
+    } else {
+        View::Compare
+    };
     ui.picker.others_open = false;
     ui.picker.in_use_first = (active_first_on(ui) && ui.picker.selected_installed(&ui.settings))
         .then_some(ui.settings.transcription.model);
@@ -381,7 +409,14 @@ pub(super) fn choose(ui: &mut Ui, model: &'static ModelDefinition) {
     let current = &ui.settings.transcription;
     let installed = ui.picker.installed(model, &current.language);
     if transcription_selection_is_active(current, model, installed) {
-        close(ui);
+        // The remembered local model is already warm: switching back downloads nothing.
+        // Supersede another preparation even when the requested model is unchanged.
+        ui.send(Request::CancelModel);
+        if !ui.settings.labs.openrouter_dictation
+            || ui.update(|settings| settings.labs.openrouter_dictation = false)
+        {
+            close(ui);
+        }
         return;
     }
     let language = model.language_for(&current.language).to_owned();
@@ -740,12 +775,13 @@ fn hidden_note(ui: &Ui, p: Paint, shown: &[PickerModel], language: &str) -> Opti
     let transcription = ui.view.as_ref().map(|view| &view.transcription);
     let preparing = transcription.and_then(|t| t.preparing);
     let selected = transcription_models::definition(ui.settings.transcription.model);
-    let active = transcription_selection_is_active(
-        &ui.settings.transcription,
-        selected,
-        ui.picker
-            .installed(selected, selected.language_for(language)),
-    )
+    let active = (!cloud_selected(ui)
+        && transcription_selection_is_active(
+            &ui.settings.transcription,
+            selected,
+            ui.picker
+                .installed(selected, selected.language_for(language)),
+        ))
     .then_some(selected.id);
     let (id, is_preparing) = hidden_model(shown, preparing, active)?;
     let model = transcription_models::definition(id);
@@ -846,6 +882,58 @@ pub(super) fn japanese_fixture(ui: &mut Ui, downloading: Option<TranscriptionMod
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_choice_persists_without_downloading_and_local_choice_restores_routing() {
+        let mut ui = Ui::with(
+            AppSettings::default(),
+            super::super::Service::Fixture(Vec::new()),
+        );
+        let local = ui.settings.transcription.clone();
+        let model = transcription_models::definition(local.model);
+        ui.picker.installed = Some(vec![local.model]);
+        choose_openrouter(&mut ui);
+        assert!(cloud_selected(&ui));
+        assert_eq!(ui.settings.transcription, local);
+        let decoded: AppSettings =
+            serde_json::from_str(&serde_json::to_string(&ui.settings).unwrap()).unwrap();
+        assert!(decoded.labs.openrouter_dictation);
+        assert_eq!(decoded.transcription, local);
+        let super::super::Service::Fixture(sent) = &ui.service else {
+            unreachable!()
+        };
+        assert!(
+            sent.iter()
+                .all(|request| !matches!(request, Request::ChooseModel { .. }))
+        );
+        let entries = facts::entries(&ui, &local.language, &[(model, None)]);
+        assert!(
+            !entries[0].in_use(),
+            "remembered local model is not the dictation provider"
+        );
+        assert!(ui.labs_open, "a missing key opens its entry panel");
+        assert_eq!(
+            ui.lab_store.drawer,
+            Some(super::super::labs::Lab::Feature(
+                crate::labs::Feature::OpenRouterDictation
+            ))
+        );
+        ui.preparing = Some((
+            TranscriptionModelId::CohereTranscribe,
+            std::time::Instant::now(),
+        ));
+        choose(&mut ui, model);
+        let super::super::Service::Fixture(sent) = &ui.service else {
+            unreachable!()
+        };
+        assert!(
+            matches!(sent.last(), Some(Request::CancelModel)),
+            "remembered local choice supersedes pending preparation"
+        );
+        assert!(!cloud_selected(&ui));
+        assert_eq!(ui.settings.transcription, local);
+        assert!(facts::entries(&ui, &local.language, &[(model, None)])[0].in_use());
+    }
 
     #[test]
     fn selected_transcription_model_is_not_active_until_installed() {

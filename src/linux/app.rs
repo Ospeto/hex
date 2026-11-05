@@ -843,7 +843,10 @@ impl LinuxDesktopHost {
                 match result {
                     Ok(prepared) => {
                         let selection = prepared.selection.clone();
-                        match save_with(|settings| settings.remember_transcription(selection)) {
+                        match save_with(|settings| {
+                            settings.remember_transcription(selection);
+                            settings.labs.openrouter_dictation = false;
+                        }) {
                             Ok(candidate) => {
                                 // Read from disk, so it may carry an outside
                                 // edit the modes must pick up too.
@@ -969,6 +972,10 @@ impl LinuxDesktopHost {
     fn adopt_settings(&mut self, settings: AppSettings) {
         if self.settings_valid && settings == self.settings {
             return;
+        }
+        if settings.labs.openrouter_dictation && !self.settings.labs.openrouter_dictation {
+            self.manual_choice();
+            self.cancel_transcription_preparation();
         }
         if self
             .keyboard_switcher

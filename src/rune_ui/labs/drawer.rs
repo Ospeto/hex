@@ -107,19 +107,23 @@ fn header(p: Paint, entry: &Row, new: bool) -> El {
 }
 
 fn body(ui: &Ui, p: Paint, entry: &Row) -> El {
-    let preview = col()
-        .key("preview")
-        .h(160.0)
-        .center()
-        .radius(p.k.radius.md)
-        .fill(p.k.c.layer_01)
-        .border(p.hair, p.k.c.border_weak)
-        .child(
-            text(tr("A short preview goes here"))
-                .key("preview-copy")
-                .font(DESCRIPTION)
-                .color(p.muted()),
-        );
+    let preview = if entry.lab == Lab::Feature(Feature::OpenRouterDictation) {
+        super::super::openrouter_key::panel(ui, p)
+    } else {
+        col()
+            .key("preview")
+            .h(160.0)
+            .center()
+            .radius(p.k.radius.md)
+            .fill(p.k.c.layer_01)
+            .border(p.hair, p.k.c.border_weak)
+            .child(
+                text(tr("A short preview goes here"))
+                    .key("preview-copy")
+                    .font(DESCRIPTION)
+                    .color(p.muted()),
+            )
+    };
     let mut body = col()
         .key("body")
         .grow(1.0)

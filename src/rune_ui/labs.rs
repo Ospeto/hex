@@ -244,7 +244,13 @@ pub(super) fn reveal(ui: &mut Ui, link: &LabsLink, tx: &mut Tx) {
     }
     let Some(id) = &link.lab else { return };
     match shown(ui).into_iter().find(|row| row.lab.id() == id) {
-        Some(row) => ui.lab_store.drawer = Some(row.lab),
+        Some(row) => {
+            let lab = row.lab;
+            ui.lab_store.drawer = Some(lab);
+            if lab == Lab::Feature(Feature::OpenRouterDictation) {
+                super::openrouter_key::refresh(ui, false);
+            }
+        }
         None => tracing::warn!(feature = %id, "a Labs link named no feature this Hex has"),
     }
 }
@@ -258,14 +264,19 @@ fn open(ui: &mut Ui, tx: &mut Tx) {
 
 fn open_drawer(ui: &mut Ui, lab: Lab) {
     ui.lab_store.drawer = Some(lab);
+    if lab == Lab::Feature(Feature::OpenRouterDictation) {
+        super::openrouter_key::refresh(ui, false);
+    }
 }
 
 pub(super) fn close_drawer(ui: &mut Ui) {
+    ui.openrouter_key.clear_draft();
     ui.lab_store.drawer = None;
 }
 
 /// ⌘F (Ctrl+F off macOS) on the Labs page puts the caret in its search.
 pub(super) fn focus_search(ui: &mut Ui) {
+    ui.openrouter_key.clear_draft();
     ui.lab_store.drawer = None;
     ui.lab_store.search.focused = true;
 }
@@ -540,7 +551,7 @@ fn rows(ui: &Ui) -> Vec<Row> {
         Feature::OpenRouterDictation,
         Some(&WAVE),
         tr("OpenRouter dictation"),
-        tr("Send audio to OpenRouter/Google Gemini 3.5 Flash Lite after recording. Requires HEX_OPENROUTER_API_KEY, network access and usage charges. Local model stays selected for other features."),
+        tr("Send audio to OpenRouter/Google Gemini 3.5 Flash Lite after recording. Requires an API key, network access and usage charges. Local model stays selected for other features."),
     ));
     rows.push(row(
         Feature::UnloadIdle,
@@ -745,6 +756,11 @@ fn flip(ui: &mut Ui, lab: Lab) {
     if !on && feature.off_refusal(&ui.settings).is_some() {
         return;
     }
+    if feature == Feature::OpenRouterDictation && on {
+        // Both entry points supersede any older local preparation.
+        super::picker::choose_openrouter(ui);
+        return;
+    }
     ui.update(|settings| feature.set(settings, on));
     match feature {
         Feature::KeyboardModelSwitching => ui.open = None,
@@ -773,4 +789,35 @@ fn unload_after(ui: &Ui, p: Paint) -> El {
         let minutes = UNLOAD_IDLE_MINUTES[index];
         ui.update(|settings| settings.labs.unload_idle_minutes = minutes);
     })
+}
+
+#[cfg(test)]
+mod openrouter_tests {
+    use super::*;
+
+    #[test]
+    fn enabling_cloud_in_labs_supersedes_an_older_local_preparation() {
+        let mut ui = Ui::with(
+            crate::app_settings::AppSettings::default(),
+            super::super::Service::Fixture(Vec::new()),
+        );
+        ui.preparing = Some((
+            crate::transcription::models::TranscriptionModelId::CohereTranscribe,
+            std::time::Instant::now(),
+        ));
+        flip(&mut ui, Lab::Feature(Feature::OpenRouterDictation));
+        assert!(ui.settings.labs.openrouter_dictation);
+        let super::super::Service::Fixture(sent) = &ui.service else {
+            unreachable!()
+        };
+        assert!(matches!(
+            sent.first(),
+            Some(super::super::Request::CancelModel)
+        ));
+        assert!(ui.labs_open);
+        assert_eq!(
+            ui.lab_store.drawer,
+            Some(Lab::Feature(Feature::OpenRouterDictation))
+        );
+    }
 }
